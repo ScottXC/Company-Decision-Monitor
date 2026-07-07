@@ -1,17 +1,83 @@
+# Operating system files
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_dsa
+id_ed25519
+*.token
+*.secret
+
+# Python bytecode and caches
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
 .coverage
+.coverage.*
 htmlcov/
+
+# Python packaging and virtual environments
+.python-version
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+site/
+
+# Local application data and runtime files
+.test_runtime/
+*.log
+logs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# PyInstaller and Windows installer outputs
 build/
 dist/
 dist_installer/
-.test_runtime/
 CompanyDecisionMonitor.spec
 *.spec~
-*.log
-*.db
-*.db-shm
-*.db-wal
+installer/Output/
+Output/
+*.setup.log
+
+# IDE and editor files
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+
+# Node or web tooling caches, if introduced later
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Misc generated archives
+*.zip
+*.7z
+*.rar

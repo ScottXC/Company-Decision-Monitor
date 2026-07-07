@@ -16,6 +16,26 @@ dist\CompanyDecisionMonitor_Portable.zip
 dist\installer\CompanyDecisionMonitor_Setup.exe
 ```
 
+## 安装方式
+
+推荐使用 Windows 安装包：
+
+```bat
+dist\installer\CompanyDecisionMonitor_Setup.exe
+```
+
+也可以使用便携版：
+
+```bat
+dist\CompanyDecisionMonitor_Portable.zip
+```
+
+解压便携版后运行：
+
+```bat
+CompanyDecisionMonitor\CompanyDecisionMonitor.exe
+```
+
 ## 直接运行 exe
 
 ```bat
@@ -126,6 +146,25 @@ python scripts\clean_build.py
 ```bat
 python scripts\clean_build.py --full
 ```
+
+## 目录结构
+
+```text
+company-decision-monitor/
+├── src/                    # PySide6 桌面应用源码
+├── docs/                   # 产品、架构、发布说明和已知问题
+├── installer/              # Inno Setup 安装包脚本
+├── scripts/                # 构建、清理和打包脚本
+├── tests/                  # 自动化测试
+├── public/                 # 预留静态资源目录
+├── backend/                # 未来后端扩展占位，不参与当前 UI Preview Mode
+├── build.bat               # Windows 一键构建脚本
+├── run_dev.bat             # 开发模式启动脚本
+├── requirements-desktop.txt
+└── pyproject.toml
+```
+
+`build/`、`dist/`、`.ruff_cache/`、`__pycache__/`、本地数据库、日志、安装包输出和便携版 zip 都属于本地生成产物，不应提交到 GitHub。
 
 ## 已完成 UI 模块
 
