@@ -1,5 +1,8 @@
 # Company Decision Monitor
 
+<details open>
+<summary><strong>English</strong></summary>
+
 Current version: `v0.1.1`
 
 Current mode: `Public + Free API Network Mode`
@@ -170,9 +173,10 @@ The installer should not contain `.env`, user API keys, cache directories, watch
 - Search results come from external providers and should be verified against original sources.
 - This software does not constitute investment advice.
 
----
+</details>
 
-## 中文说明
+<details>
+<summary><strong>中文</strong></summary>
 
 当前版本：`v0.1.1`  
 当前模式：`Public + Free API Network Mode`
@@ -361,3 +365,5 @@ build.bat
 - 免费层额度、字段覆盖、注册流程和服务条款可能变化，请以 provider 官方页面为准。
 - 搜索结果来自外部 provider，用户需要核验原始来源。
 - 本软件不构成投资建议。
+
+</details>
