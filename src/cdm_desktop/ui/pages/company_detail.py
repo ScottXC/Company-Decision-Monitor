@@ -16,9 +16,10 @@ from PySide6.QtWidgets import (
 )
 
 from cdm_desktop.paths import AppPaths
-from cdm_desktop.public_api import PublicSearchService, SearchResponse
-from cdm_desktop.public_api.models import CompanyResult, ProviderStatus
+from cdm_desktop.public_api import CompanyNewsService, CompanyProfileService
+from cdm_desktop.public_api.models import CompanyProfile, CompanyResult, NewsItem, ProviderStatus
 from cdm_desktop.public_api.watchlist_store import WatchlistStore
+from cdm_desktop.public_api.xueqiu_external_link import build_xueqiu_external_link
 from cdm_desktop.ui.components import (
     DetailGrid,
     EmptyState,
@@ -45,7 +46,8 @@ class CompanyDetailPage(QWidget):
         self.navigate = navigate
         self.paths = paths
         self.current_company: CompanyResult | None = None
-        self.service = PublicSearchService(paths)
+        self.profile_service = CompanyProfileService(paths)
+        self.news_service = CompanyNewsService(paths)
         self.watchlist = WatchlistStore(paths)
         self.thread_pool = QThreadPool.globalInstance()
 
@@ -225,22 +227,34 @@ class CompanyDetailPage(QWidget):
         company = self.current_company
         if not company:
             return
-        query = company.symbol or company.name
-        worker = FunctionWorker(self.service.search, query, 8)
+        worker = FunctionWorker(self._load_company_data, company)
         worker.signals.finished.connect(self._render_related)
         worker.signals.error.connect(self._render_related_error)
         self.thread_pool.start(worker)
 
+    def _load_company_data(
+        self,
+        company: CompanyResult,
+    ) -> tuple[CompanyProfile | None, list[ProviderStatus], list[NewsItem], list[ProviderStatus]]:
+        profile, profile_statuses = self.profile_service.get_profile(company)
+        news, news_statuses = self.news_service.get_news(company, limit=12)
+        return profile, profile_statuses, news, news_statuses
+
     def _render_related(self, result: object) -> None:
-        if not isinstance(result, SearchResponse):
+        if not isinstance(result, tuple) or len(result) != 4:
             self._render_related_error("详情服务返回未知结果。")
             return
+        profile, profile_statuses, news_items, news_statuses = result
+        if isinstance(profile, CompanyProfile):
+            self.current_company = _company_from_profile(self.current_company, profile)
         self._clear_layout(self.news_layout)
         news_card = SectionCard("相关新闻", "只展示标题、来源、时间和链接，不复制新闻全文。")
-        if not result.news:
+        if not news_items:
             news_card.layout.addWidget(EmptyState("暂无相关新闻", "已配置的新闻 provider 当前未返回结果。"))
-        for news in result.news[:8]:
+        for news in news_items[:8]:
             item = SectionCard(news.title, f"{news.provider} · {news.source or '未知来源'} · {news.published_at or '暂无时间'}")
+            if news.from_cache:
+                item.layout.addWidget(StatusBadge("来自缓存", "info"))
             if news.snippet:
                 snippet = QLabel(news.snippet[:260])
                 snippet.setWordWrap(True)
@@ -252,11 +266,42 @@ class CompanyDetailPage(QWidget):
                 item.layout.addWidget(open_btn)
             news_card.layout.addWidget(item)
         self.news_layout.addWidget(news_card)
+        if self.current_company:
+            self.news_layout.addWidget(self._xueqiu_external_link_card(self.current_company))
         self.news_layout.addStretch()
 
         self._clear_layout(self.source_layout)
-        self.source_layout.addWidget(self._source_status_card(result.statuses, result.from_cache))
+        if isinstance(profile, CompanyProfile):
+            self.source_layout.addWidget(self._profile_result_card(profile))
+        self.source_layout.addWidget(self._source_status_card([*profile_statuses, *news_statuses], bool(profile and profile.from_cache)))
         self.source_layout.addStretch()
+
+    def _profile_result_card(self, profile: CompanyProfile) -> SectionCard:
+        card = SectionCard("已获取的公司详情字段", "这里只展示 provider 真实返回并成功合并的字段。")
+        if profile.from_cache:
+            card.layout.addWidget(StatusBadge("来自缓存", "info"))
+        card.layout.addWidget(
+            DetailGrid(
+                [
+                    ("Display name", profile.display_name),
+                    ("Symbol", profile.symbol),
+                    ("Exchange", profile.exchange),
+                    ("Country", profile.country),
+                    ("Sector", profile.sector),
+                    ("Industry", profile.industry),
+                    ("Website", profile.website),
+                    ("Price", profile.price),
+                    ("Market cap", profile.market_cap),
+                    ("Currency", profile.currency),
+                    ("CEO", profile.ceo),
+                    ("Employees", profile.employees),
+                    ("Wikidata", profile.wikidata_id),
+                    ("Wikipedia", profile.wikipedia_url),
+                ],
+                columns=2,
+            )
+        )
+        return card
 
     def _source_status_card(self, statuses: list[ProviderStatus], from_cache: bool) -> SectionCard:
         card = SectionCard("数据来源状态", "provider 细节集中在这里，避免干扰概览。")
@@ -271,6 +316,36 @@ class CompanyDetailPage(QWidget):
             msg.setWordWrap(True)
             row.addWidget(msg, 1)
             card.layout.addLayout(row)
+        return card
+
+    def _xueqiu_external_link_card(self, company: CompanyResult) -> SectionCard:
+        link = build_xueqiu_external_link(
+            symbol=company.symbol,
+            exchange=company.exchange,
+            market=company.market,
+            company_name=company.name or company.display_name or company.legal_name,
+        )
+        card = SectionCard(
+            "雪球社区入口",
+            "可在雪球查看该公司的投资者讨论、行情页面和社区动态。本应用仅提供外部链接，不抓取、不缓存、不总结雪球内容。",
+        )
+        badge_row = QHBoxLayout()
+        badge_row.addWidget(StatusBadge("外部链接", "info"))
+        badge_row.addWidget(StatusBadge("不抓取内容", "warning"))
+        badge_row.addStretch()
+        card.layout.addLayout(badge_row)
+
+        note = QLabel(link.description if link.is_direct_stock_link else "暂无可直接跳转的雪球股票代码。可手动打开雪球搜索公司名称。")
+        note.setObjectName("MutedText")
+        note.setWordWrap(True)
+        card.layout.addWidget(note)
+
+        action_row = QHBoxLayout()
+        open_btn = QPushButton("打开雪球" if link.is_direct_stock_link else "打开雪球首页")
+        open_btn.clicked.connect(lambda _checked=False, url=link.url: QDesktopServices.openUrl(QUrl(url)))
+        action_row.addWidget(open_btn)
+        action_row.addStretch()
+        card.layout.addLayout(action_row)
         return card
 
     def _render_related_error(self, message: str) -> None:
@@ -310,3 +385,22 @@ class CompanyDetailPage(QWidget):
                 widget.deleteLater()
             elif child_layout:
                 self._clear_layout(child_layout)
+
+
+def _company_from_profile(company: CompanyResult | None, profile: CompanyProfile) -> CompanyResult | None:
+    if company is None:
+        return None
+    company.display_name = profile.display_name or company.display_name
+    company.name = profile.display_name or company.name
+    company.symbol = profile.symbol or company.symbol
+    company.exchange = profile.exchange or company.exchange
+    company.market = profile.market or company.market
+    company.lei = profile.lei or company.lei
+    company.wikidata_id = profile.wikidata_id or company.wikidata_id
+    company.wikipedia_url = profile.wikipedia_url or company.wikipedia_url
+    company.website = profile.website or company.website
+    company.description = profile.description or company.description
+    company.country = profile.country or company.country
+    company.raw = {**company.raw, "latest_profile": profile.to_dict()}
+    company.from_cache = profile.from_cache
+    return company

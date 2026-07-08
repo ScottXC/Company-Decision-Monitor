@@ -1,6 +1,6 @@
 #define AppName "Company Decision Monitor"
-#define AppVersion "0.1.1"
-#define AppVersionName "v0.1.1-public-free-api-network"
+#define AppVersion "0.1.2"
+#define AppVersionName "v0.1.2-core-functions"
 #define AppPublisher "CompanyDecisionMonitor"
 #define AppExeName "CompanyDecisionMonitor.exe"
 #define AppDistDir "..\dist\CompanyDecisionMonitor"

@@ -41,6 +41,21 @@ class ApiCache:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     def get(self, key: str) -> Any | None:
+        payload = self._read_payload(key)
+        if payload is None:
+            return None
+        expires_at = payload["expires_at"]
+        if expires_at < datetime.utcnow():
+            return None
+        return payload["data"]
+
+    def get_stale(self, key: str) -> Any | None:
+        payload = self._read_payload(key)
+        if payload is None:
+            return None
+        return payload["data"]
+
+    def _read_payload(self, key: str) -> dict[str, Any] | None:
         path = self._path(key)
         if not path.exists():
             return None
@@ -49,9 +64,7 @@ class ApiCache:
             expires_at = datetime.fromisoformat(str(payload["expires_at"]))
         except (OSError, KeyError, ValueError, json.JSONDecodeError):
             return None
-        if expires_at < datetime.utcnow():
-            return None
-        return payload.get("data")
+        return {"expires_at": expires_at, "data": payload.get("data")}
 
     def set(self, key: str, data: Any, ttl_seconds: int | None = None) -> None:
         expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds or self.ttl_seconds)

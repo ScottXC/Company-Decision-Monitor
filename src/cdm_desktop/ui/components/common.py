@@ -27,8 +27,16 @@ STATE_LABELS = {
     "disabled": "暂未接入",
     "failed": "异常",
     "rate_limited": "限流",
+    "quota_exceeded": "额度已用完",
+    "premium_endpoint": "高级端点不可用",
     "invalid_key": "Key 可能无效",
     "empty": "无结果",
+    "network_timeout": "请求超时",
+    "dns_failure": "网络不可用",
+    "http_error": "服务错误",
+    "parse_error": "解析失败",
+    "provider_unavailable": "来源不可用",
+    "cache_miss": "无缓存",
 }
 
 STATE_TONES = {
@@ -37,8 +45,16 @@ STATE_TONES = {
     "disabled": "neutral",
     "failed": "danger",
     "rate_limited": "warning",
+    "quota_exceeded": "warning",
+    "premium_endpoint": "warning",
     "invalid_key": "danger",
     "empty": "neutral",
+    "network_timeout": "warning",
+    "dns_failure": "warning",
+    "http_error": "danger",
+    "parse_error": "danger",
+    "provider_unavailable": "danger",
+    "cache_miss": "neutral",
 }
 
 CATEGORY_LABELS = {
@@ -47,6 +63,7 @@ CATEGORY_LABELS = {
     "financial": "上市证券",
     "news": "新闻媒体",
     "fallback": "补充来源",
+    "external_link": "外部链接",
 }
 
 

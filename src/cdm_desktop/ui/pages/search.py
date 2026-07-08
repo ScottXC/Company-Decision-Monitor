@@ -23,6 +23,7 @@ from cdm_desktop.public_api import PublicSearchService, SearchResponse
 from cdm_desktop.public_api.models import CompanyResult, NewsItem, ProviderStatus
 from cdm_desktop.public_api.search_service import REGION_OPTIONS, region_label
 from cdm_desktop.public_api.watchlist_store import WatchlistStore
+from cdm_desktop.public_api.xueqiu_external_link import build_xueqiu_external_link
 from cdm_desktop.ui.components import (
     CollapsibleSection,
     DetailGrid,
@@ -309,6 +310,21 @@ class SearchPage(QWidget):
                 columns=2,
             )
         )
+        xueqiu_link = build_xueqiu_external_link(
+            symbol=company.symbol,
+            exchange=company.exchange,
+            market=company.market,
+            company_name=company.name or company.display_name or company.legal_name,
+        )
+        if xueqiu_link.is_direct_stock_link:
+            external_row = QHBoxLayout()
+            external_row.addWidget(StatusBadge("外部链接", "info"))
+            external_row.addWidget(StatusBadge("不抓取内容", "warning"))
+            open_xueqiu = QPushButton("打开雪球")
+            open_xueqiu.clicked.connect(lambda _checked=False, url=xueqiu_link.url: QDesktopServices.openUrl(QUrl(url)))
+            external_row.addWidget(open_xueqiu)
+            external_row.addStretch()
+            advanced.body_layout.addLayout(external_row)
         card.layout.addWidget(advanced)
         return card
 

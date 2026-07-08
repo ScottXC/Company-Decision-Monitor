@@ -10,6 +10,7 @@ from cdm_desktop.public_api.key_store import ApiKeyStore
 from cdm_desktop.public_api.models import (
     CompanyResult,
     NewsItem,
+    ProviderError,
     ProviderMeta,
     ProviderStatus,
     SearchResponse,
@@ -34,24 +35,24 @@ REGION_OPTIONS: tuple[tuple[SearchRegion, str, str], ...] = (
 
 REGION_PROVIDER_PRIORITY: dict[SearchRegion, tuple[str, ...]] = {
     "all": (
-        "nasdaq_directory",
-        "gleif",
         "fmp",
         "alpha_vantage",
+        "nasdaq_directory",
+        "wikidata",
+        "gleif",
         "companies_house",
         "norway_brreg",
         "opencorporates",
         "marketaux",
-        "rss",
     ),
-    "us": ("nasdaq_directory", "fmp", "alpha_vantage", "gleif", "marketaux", "rss"),
-    "cn": ("fmp", "alpha_vantage", "gleif", "marketaux", "rss"),
-    "hk": ("fmp", "alpha_vantage", "gleif", "marketaux", "rss"),
-    "uk": ("companies_house", "opencorporates", "gleif", "fmp", "marketaux", "rss"),
-    "eu": ("gleif", "opencorporates", "fmp", "marketaux", "rss"),
-    "no": ("norway_brreg", "gleif", "opencorporates", "marketaux", "rss"),
-    "global": ("gleif", "opencorporates", "marketaux", "rss"),
-    "news": ("marketaux", "rss"),
+    "us": ("fmp", "alpha_vantage", "nasdaq_directory", "wikidata", "gleif", "marketaux"),
+    "cn": ("fmp", "alpha_vantage", "wikidata", "gleif", "marketaux"),
+    "hk": ("fmp", "alpha_vantage", "wikidata", "gleif", "marketaux"),
+    "uk": ("fmp", "alpha_vantage", "companies_house", "opencorporates", "wikidata", "gleif", "marketaux"),
+    "eu": ("fmp", "alpha_vantage", "wikidata", "gleif", "opencorporates", "marketaux"),
+    "no": ("fmp", "alpha_vantage", "norway_brreg", "wikidata", "gleif", "opencorporates", "marketaux"),
+    "global": ("fmp", "alpha_vantage", "wikidata", "gleif", "opencorporates", "marketaux"),
+    "news": ("marketaux", "fmp"),
 }
 
 SCOPE_PROVIDER_CATEGORIES: dict[SearchScope, set[str]] = {
@@ -101,6 +102,8 @@ class PublicSearchService:
 
         companies: list[CompanyResult] = []
         news: list[NewsItem] = []
+        errors = []
+        warnings = []
         statuses: list[ProviderStatus] = [
             ProviderStatus(
                 "provider_filter",
@@ -114,11 +117,14 @@ class PublicSearchService:
             )
         ]
         for meta in selected_providers:
-            provider = provider_for(meta, self.key_store, self.http)
+            provider = provider_for(meta, self.key_store, self.http, self.cache)
             provider_companies, provider_news, error = provider.search(normalized, limit=limit)
             companies.extend(provider_companies)
             news.extend(provider_news)
             if error:
+                errors.append(error)
+                if error.state == "not_configured":
+                    warnings.append(error.message)
                 statuses.append(
                     ProviderStatus(
                         meta.provider_id,
@@ -135,13 +141,27 @@ class PublicSearchService:
                 statuses.append(
                     ProviderStatus(meta.provider_id, meta.display_name, meta.category, state, message)
                 )
+        companies = _dedupe_companies(companies)[:limit]
+        news = _dedupe_news(news)[:limit]
+        if not companies and not news and errors and use_cache:
+            stale = self.cache.get_stale(key)
+            if isinstance(stale, dict):
+                cached_response = _response_from_cache(stale)
+                cached_response.warnings.append("网络或 provider 请求失败，当前展示本地缓存结果。")
+                cached_response.errors.extend(errors)
+                return cached_response
+
+        grouped = _group_companies(companies)
         response = SearchResponse(
             query=normalized,
-            companies=_dedupe_companies(companies)[:limit],
-            news=news[:limit],
+            companies=companies,
+            news=news,
             statuses=statuses,
+            grouped_results=grouped,
+            warnings=warnings,
+            errors=errors,
         )
-        self.cache.set(key, _response_to_cache(response), ttl_seconds=300)
+        self.cache.set(key, _response_to_cache(response), ttl_seconds=900)
         return response
 
     def selected_provider_ids(
@@ -207,7 +227,7 @@ class PublicSearchService:
                     f"未配置 {meta.key_name}，已跳过该增强数据源。",
                 )
             else:
-                provider = provider_for(meta, self.key_store, self.http)
+                provider = provider_for(meta, self.key_store, self.http, self.cache)
                 companies, news, error = provider.search(probe_query, limit=1)
                 if error:
                     status = ProviderStatus(
@@ -281,7 +301,18 @@ def _response_to_cache(response: SearchResponse) -> dict[str, object]:
     return {
         "query": response.query,
         "companies": [company.to_dict() for company in response.companies],
-        "news": [item.__dict__ for item in response.news],
+        "news": [item.to_dict() for item in response.news],
+        "warnings": response.warnings,
+        "errors": [
+            {
+                "provider_id": error.provider_id,
+                "state": error.state,
+                "message": error.message,
+                "status_code": error.status_code,
+                "retryable": error.retryable,
+            }
+            for error in response.errors
+        ],
         "statuses": [
             {
                 "provider_id": item.provider_id,
@@ -303,7 +334,7 @@ def _response_from_cache(data: dict[str, object]) -> SearchResponse:
         for item in data.get("companies", [])
         if isinstance(item, dict)
     ]
-    news = [NewsItem(**item) for item in data.get("news", []) if isinstance(item, dict)]
+    news = [NewsItem.from_dict(item) for item in data.get("news", []) if isinstance(item, dict)]
     statuses = []
     for item in data.get("statuses", []):
         if not isinstance(item, dict):
@@ -316,10 +347,52 @@ def _response_from_cache(data: dict[str, object]) -> SearchResponse:
             except ValueError:
                 value["checked_at"] = datetime.utcnow()
         statuses.append(ProviderStatus(**value))
+    errors = []
+    for item in data.get("errors", []):
+        if isinstance(item, dict):
+            errors.append(
+                ProviderError(
+                    str(item.get("provider_id") or ""),
+                    item.get("state") or "failed",
+                    str(item.get("message") or ""),
+                    item.get("status_code"),
+                    bool(item.get("retryable") or False),
+                )
+            )
     return SearchResponse(
         query=str(data.get("query") or ""),
         companies=companies,
         news=news,
         statuses=statuses,
+        grouped_results=_group_companies(companies),
+        warnings=[str(item) for item in data.get("warnings", []) if item],
+        errors=errors,
         from_cache=True,
     )
+
+
+def _dedupe_news(news: list[NewsItem]) -> list[NewsItem]:
+    deduped: dict[str, NewsItem] = {}
+    for item in news:
+        key = item.dedupe_key()
+        if key not in deduped:
+            deduped[key] = item
+    return sorted(deduped.values(), key=lambda item: item.published_at, reverse=True)
+
+
+def _group_companies(companies: list[CompanyResult]) -> dict[str, list[CompanyResult]]:
+    return {
+        "best_matches": [item for item in companies if item.match_score >= 85],
+        "listed_companies": [
+            item
+            for item in companies
+            if item.category == "financial" or item.provider_id in {"fmp", "alpha_vantage", "nasdaq_directory"}
+        ],
+        "legal_entities": [
+            item
+            for item in companies
+            if item.category in {"registry", "global"} and item.provider_id in {"gleif", "opencorporates", "companies_house", "norway_brreg"}
+        ],
+        "encyclopedia_entities": [item for item in companies if item.provider_id == "wikidata"],
+        "possible_matches": [item for item in companies if item.match_score < 85],
+    }

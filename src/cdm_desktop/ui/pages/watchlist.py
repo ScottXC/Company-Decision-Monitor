@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QThreadPool, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -23,8 +23,10 @@ from cdm_desktop.ui.components import (
     PageHeader,
     SectionCard,
     StatusBadge,
+    sanitize_error_message,
     scroll_container,
 )
+from cdm_desktop.ui.widgets import FunctionWorker
 
 
 class WatchlistPage(QWidget):
@@ -44,6 +46,7 @@ class WatchlistPage(QWidget):
         self.on_company_selected = on_company_selected
         self.watchlist = WatchlistStore(paths)
         self.search_text = ""
+        self.thread_pool = QThreadPool.globalInstance()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -59,8 +62,8 @@ class WatchlistPage(QWidget):
                 "像自选股列表一样集中查看已保存公司；自选数据只保存在本机。",
                 primary_text="添加公司",
                 primary_action=lambda: self.navigate("/search"),
-                secondary_text="刷新",
-                secondary_action=self.refresh,
+                secondary_text="刷新全部",
+                secondary_action=self._refresh_all,
             )
         )
         self.layout.addWidget(self._toolbar())
@@ -107,7 +110,7 @@ class WatchlistPage(QWidget):
         header = QWidget()
         layout = QGridLayout(header)
         layout.setContentsMargins(12, 4, 12, 4)
-        headers = ["公司", "标识", "市场 / 地区", "数据来源", "操作"]
+        headers = ["公司", "标识", "市场 / 地区", "状态", "操作"]
         for column, text in enumerate(headers):
             label = QLabel(text)
             label.setObjectName("FieldLabel")
@@ -144,16 +147,20 @@ class WatchlistPage(QWidget):
         market_label.setWordWrap(True)
         layout.addWidget(market_label, 0, 2)
 
-        layout.addWidget(StatusBadge(company.provider or "公开来源", "info"), 0, 3)
+        status_text = company.last_status or company.provider or "公开来源"
+        layout.addWidget(StatusBadge(status_text[:24], "info" if company.last_status != "refresh_failed" else "warning"), 0, 3)
 
         actions = QHBoxLayout()
         detail_btn = QPushButton("详情")
         detail_btn.setObjectName("PrimaryButton")
         detail_btn.clicked.connect(lambda _checked=False, c=company: self._open_company(c))
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(lambda _checked=False, c=company: self._refresh_company(c))
         remove_btn = QPushButton("删除")
         remove_btn.setObjectName("DangerButton")
         remove_btn.clicked.connect(lambda _checked=False, c=company: self._remove_company(c))
         actions.addWidget(detail_btn)
+        actions.addWidget(refresh_btn)
         if company.source_url:
             source_btn = QPushButton("来源")
             source_btn.clicked.connect(lambda _checked=False, url=company.source_url: QDesktopServices.openUrl(QUrl(url)))
@@ -214,6 +221,18 @@ class WatchlistPage(QWidget):
             return
         self.watchlist.remove(company.dedupe_key())
         self.refresh()
+
+    def _refresh_company(self, company: CompanyResult) -> None:
+        worker = FunctionWorker(self.watchlist.refresh_item, company.dedupe_key())
+        worker.signals.finished.connect(lambda _result: self.refresh())
+        worker.signals.error.connect(lambda message: QMessageBox.warning(self, "刷新失败", sanitize_error_message(message)))
+        self.thread_pool.start(worker)
+
+    def _refresh_all(self) -> None:
+        worker = FunctionWorker(self.watchlist.refresh_all)
+        worker.signals.finished.connect(lambda _result: self.refresh())
+        worker.signals.error.connect(lambda message: QMessageBox.warning(self, "刷新失败", sanitize_error_message(message)))
+        self.thread_pool.start(worker)
 
     def _company_type(self, company: CompanyResult) -> str:
         if company.symbol or company.exchange or company.market:

@@ -1,5 +1,80 @@
 # Release Notes
 
+## v0.1.2-rc1 - Xueqiu External Community Link
+
+Release type: compliance-bounded external source entry for `v0.1.2-core-functions`.
+
+### Completed
+
+- Added Xueqiu external community link provider.
+- Added safe symbol-to-Xueqiu URL generation for A-share, Hong Kong, and U.S. symbols.
+- Added a Company Profile card for "雪球社区入口".
+- Added a secondary search-result action under the advanced fields area when a direct stock link can be generated.
+- Added Settings provider status for "雪球社区入口" as an external link source that requires no API key.
+- Added release artifact validation for forbidden Xueqiu token/cookie markers.
+
+### Compliance Boundary
+
+- It only opens Xueqiu pages in the system browser after a user click.
+- It does not scrape Xueqiu pages.
+- It does not call non-public Xueqiu interfaces.
+- It does not use user cookies or tokens.
+- It does not cache, index, store, summarize, train on, or ingest Xueqiu content into AI/RAG flows.
+- It is not counted as a real news provider and is not included in news freshness counts.
+
+## v0.1.2-core-functions - Core Function Loop
+
+Release type: Windows desktop core-function build for `Public + Free API Network Mode`.
+
+### Completed
+
+- Updated the application version to `v0.1.2-core-functions`.
+- Completed provider-backed company search aggregation with configured providers and public fallbacks.
+- Implemented FMP company search, company profile mapping, and stock news mapping.
+- Implemented Alpha Vantage SYMBOL_SEARCH and OVERVIEW mapping.
+- Implemented Marketaux company news mapping.
+- Confirmed Nasdaq Symbol Directory fallback parsing and stale-cache fallback.
+- Added Wikidata / Wikipedia entity fallback for public company/entity metadata.
+- Added GLEIF legal entity fallback mapping.
+- Added company profile field merging with field-level provider source tracking.
+- Added company news aggregation and de-duplication.
+- Added local watchlist single-company refresh and refresh-all flow.
+- Added cache fallback paths for search, company profile, news, Nasdaq directory, Wikidata, and GLEIF service usage.
+- Added provider error states for missing configuration, invalid keys, quota/rate limits, network timeout, parse errors, empty results, and unavailable providers.
+- Added API key safety checks for masking, cache-key redaction, and request-log redaction.
+- Updated README with v0.1.2 usage, free API key registration links, cache behavior, and stub provider status.
+
+### Still Stubbed Or Not Yet Complete
+
+- INSEE SIRENE.
+- ABN Lookup.
+- Japan Corporate Number.
+- Singapore ACRA.
+- Corporations Canada.
+- Guardian.
+- NewsAPI.
+- RSS / Atom.
+- Twelve Data.
+- Brazil / India / China / Germany / Netherlands registry strategy.
+- AI summaries.
+- Risk rule engine.
+- Research report export.
+- CSV / Excel / local company database import.
+
+### Deliverables
+
+- `dist\CompanyDecisionMonitor\CompanyDecisionMonitor.exe`
+- `dist\CompanyDecisionMonitor_Portable.zip`
+- `dist\installer\CompanyDecisionMonitor_Setup.exe`
+
+### Security And Privacy Notes
+
+- No real API keys are hardcoded.
+- User API keys are not packaged into the installer.
+- Cache keys redact API key, token, secret, GUID, `apikey`, and `api_token` values.
+- Provider failures are mapped to user-readable states instead of raw tracebacks.
+- Watchlist data remains local to the user's machine.
+
 ## v0.1.1 - Public + Free API Network Mode
 
 Release type: Windows desktop public-network research build with optional free API key support.

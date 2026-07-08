@@ -12,7 +12,7 @@ class PublicHttpClient:
     def __init__(
         self,
         *,
-        user_agent: str = "CompanyDecisionMonitor/0.1.1",
+        user_agent: str = "CompanyDecisionMonitor/0.1.2-core-functions",
         timeout_seconds: float = 15.0,
         retry_count: int = 2,
     ) -> None:
@@ -38,7 +38,7 @@ class PublicHttpClient:
         except ValueError:
             return None, ProviderError(
                 provider_id=provider_id,
-                state="failed",
+                state="parse_error",
                 message="JSON 解析失败，provider 返回格式异常。",
                 retryable=False,
             )
@@ -80,14 +80,14 @@ class PublicHttpClient:
             except httpx.TimeoutException:
                 last_error = ProviderError(
                     provider_id,
-                    "failed",
+                    "network_timeout",
                     "网络请求超时，请检查网络连接后重试。",
                     retryable=True,
                 )
             except httpx.RequestError:
                 last_error = ProviderError(
                     provider_id,
-                    "failed",
+                    "dns_failure",
                     "网络不可用或 DNS 解析失败，请检查网络连接。",
                     retryable=True,
                 )
@@ -117,7 +117,7 @@ class PublicHttpClient:
                 elif response.status_code >= 400:
                     return None, ProviderError(
                         provider_id,
-                        "failed",
+                        "http_error",
                         f"外部服务返回错误状态码 {response.status_code}。",
                         response.status_code,
                         retryable=response.status_code >= 500,
