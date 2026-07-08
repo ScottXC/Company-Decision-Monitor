@@ -2,60 +2,70 @@
 
 ## v0.1.1 - Public + Free API Network Mode
 
-版本定位：Windows 桌面端公开数据源 + 免费 API key 联网版。
+Release type: Windows desktop public-network research build with optional free API key support.
 
-### 已完成
+### Highlights
 
-- 版本号更新为 `v0.1.1`。
-- 模式更新为 `Public + Free API Network Mode`。
-- 新增 API key 本机存储和 masking。
-- 新增 provider registry 和 provider 状态模型。
-- 新增 HTTP client 错误映射。
-- 新增本地缓存，cache key 不包含明文 API key。
-- 新增 fuzzy/query 工具。
-- 实现基础 provider 映射：
-  - FMP symbol search / news mapping。
-  - Alpha Vantage SYMBOL_SEARCH mapping。
-  - Marketaux news mapping。
-  - GLEIF LEI mapping。
-  - Wikidata entity mapping。
-  - Nasdaq Symbol Directory parsing。
-  - OpenCorporates mapping。
-  - UK Companies House mapping。
-  - Norway BRREG mapping。
-- 设置页新增免费 API key / token / GUID 配置入口。
-- 搜索页改为真实 provider 搜索入口。
-- 公司详情页展示真实 provider 返回字段和相关新闻。
-- 自选公司保存到用户本机。
-- README 增加 API matrix、注册入口和国家覆盖策略。
+- Updated the application version to `v0.1.1`.
+- Updated the application mode to `Public + Free API Network Mode`.
+- Added local API key storage with masked key display.
+- Added a provider registry and provider status model.
+- Added HTTP client error mapping.
+- Added local request caching without plaintext API keys in cache keys.
+- Added fuzzy search and query helper utilities.
+- Added provider mappings for:
+  - FMP symbol search and news.
+  - Alpha Vantage symbol search.
+  - Marketaux news.
+  - GLEIF LEI search.
+  - Wikidata entity mapping.
+  - Nasdaq Symbol Directory parsing.
+  - OpenCorporates company search.
+  - UK Companies House company search.
+  - Norway BRREG company search.
+- Added free API key, token, and GUID configuration in Settings.
+- Reworked Company Search into a provider-backed search entry point.
+- Reworked Company Profile to display provider-returned fields and related news.
+- Added local watchlist persistence.
+- Updated README with the API matrix, provider registration links, and region coverage strategy.
+- Polished the data source settings UI to reduce card spacing and improve information density.
 
-### Stub / 未完成
+### Stubbed Or Not Yet Complete
 
-- Guardian Open Platform。
-- NewsAPI。
-- INSEE SIRENE。
-- ABN Lookup。
-- Japan Corporate Number。
-- Singapore ACRA Open Data。
-- Corporations Canada。
-- Finnhub / Twelve Data。
-- 完整财务建模、风险规则引擎、AI 总结和报告导出。
+- Guardian Open Platform.
+- NewsAPI.
+- INSEE SIRENE.
+- ABN Lookup.
+- Japan Corporate Number.
+- Singapore ACRA Open Data.
+- Corporations Canada.
+- Finnhub and Twelve Data.
+- Full financial modeling.
+- Full risk rule engine.
+- AI summaries.
+- Research report export.
 
-### 交付物
+### Deliverables
 
 - `dist\CompanyDecisionMonitor\CompanyDecisionMonitor.exe`
 - `dist\CompanyDecisionMonitor_Portable.zip`
 - `dist\installer\CompanyDecisionMonitor_Setup.exe`
 
-### 安全说明
+### Security And Privacy Notes
 
-- 不硬编码真实 API key。
-- 不把用户 key 打包进安装包。
-- 不把 `.env` 打包进安装包。
-- 未配置 key 的 provider 自动跳过。
+- No real API keys are hardcoded.
+- User API keys are not packaged into the installer.
+- `.env` files are not packaged into the installer.
+- Providers without configured keys are skipped automatically.
+- Watchlist data and API keys are stored locally on the user's machine.
 
-## v0.1.0
+## v0.1.0 - UI Preview
 
-版本定位：Windows 桌面端 UI 预览版。
+Release type: Windows desktop UI preview build.
 
-已完成 PyInstaller exe、portable zip、Inno Setup 安装包、基础页面和空状态设计。
+### Highlights
+
+- Added the PyInstaller executable build.
+- Added the portable zip build.
+- Added the Inno Setup installer build.
+- Added the initial desktop UI pages and empty-state design.

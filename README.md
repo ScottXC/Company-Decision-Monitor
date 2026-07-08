@@ -1,5 +1,179 @@
 # Company Decision Monitor
 
+Current version: `v0.1.1`
+
+Current mode: `Public + Free API Network Mode`
+
+Company Decision Monitor is a Windows desktop application for company research and corporate activity monitoring. It helps users search public company and entity data, review provider-backed company profiles, track a local watchlist, and inspect publicly available news or market-related signals where configured data sources support them.
+
+The application does not provide investment advice, trading features, buy/sell/order workflows, portfolio P&L, target prices, or return forecasts.
+
+## Core Workflow
+
+1. Open the desktop application.
+2. Go to **Company Search**.
+3. Search by company name, ticker, abbreviation, LEI, or registration number.
+4. Providers without configured keys are skipped automatically and shown in provider status.
+5. Configure optional free API keys to improve company search, profile, and news coverage.
+6. Add real search results to the local watchlist.
+7. Open **Watchlist** to review companies saved on this computer.
+8. Open **Company Profile** to inspect provider-returned fields, source metadata, and related news.
+
+## UI Guide
+
+v0.1.1 UI Polish organizes the app into five primary areas: **Dashboard**, **Company Search**, **Watchlist**, **Company Profile**, and **Data Source Settings**.
+
+### Dashboard
+
+- Use the top search entry to search company names, tickers, abbreviations, or short names.
+- The dashboard shows only high-level operational status: search capability, configured free API key count, watchlist count, and cache status.
+- If the watchlist is empty, use the search action to add a company.
+- The app does not show fake trending companies when there is no reliable public source.
+
+### Company Search
+
+- Search by full company name, ticker, abbreviation, LEI, or registration number.
+- Results are grouped into best matches, listed securities, legal entities, related news, and possible matches.
+- Each result card shows only essential fields first; provider details are kept out of the main flow.
+- Local provider errors and unconfigured providers are summarized instead of taking over the page.
+
+### Free API Key Configuration
+
+- Open **Settings** -> **Free API key**.
+- Recommended optional sources include FMP, Alpha Vantage, and Marketaux.
+- Empty input fields do not overwrite existing keys.
+- Saved keys are stored locally and displayed only as masked values.
+
+### Provider Status
+
+- The dashboard shows provider categories in plain language.
+- The settings page shows detailed provider status and connectivity testing.
+- Status labels include available, not configured, not connected, error, rate limited, invalid key, and empty result.
+
+### Watchlist
+
+- Click **Add to Watchlist** from a search result.
+- Watchlist data is stored locally in the user AppData directory.
+- Removing a company from the watchlist does not clear cache or historical search data.
+
+### Cache
+
+- Open **Settings** -> **Cache & Privacy**.
+- Use **Clear Cache** to remove public request cache files.
+- Cache is only used to reduce repeated provider requests and does not contain plaintext API keys.
+
+## Data Source Principles
+
+- No fake company data.
+- No fake news.
+- No fake financial data.
+- No CSV, Excel, or local company database import flow.
+- No hardcoded real API keys.
+- User API keys are not packaged into the installer.
+- API keys are stored only on the user's computer.
+- The UI displays masked keys only.
+- Network and provider failures should show readable status instead of a blank screen.
+
+## Provider Matrix
+
+| Provider | Coverage | Purpose | API key required | Current status |
+|---|---|---|---|---|
+| GLEIF LEI | Global legal entities | LEI, legal name, registration status, jurisdiction | No | Implemented |
+| Nasdaq Symbol Directory | U.S. listed securities | Symbol and security name search | No | Implemented |
+| Financial Modeling Prep | Global listed companies | Symbol search, profile, news | Yes, optional free key | Basic mapping implemented |
+| Alpha Vantage | Major listed securities | Symbol search, overview | Yes, optional free key | Symbol search mapping implemented |
+| Marketaux | Financial news | News and media mentions | Yes, optional free key | News mapping implemented |
+| OpenCorporates | Company registries | Company search and jurisdiction metadata | Yes, plan-dependent | Basic mapping implemented |
+| UK Companies House | UK companies | Company search and status | Yes | Basic mapping implemented |
+| Norway BRREG | Norwegian companies | Organization number, legal name, address | No | Basic mapping implemented |
+| INSEE SIRENE | French companies | SIREN/SIRET and legal units | Possibly | Stub |
+| ABN Lookup | Australian businesses | ABN, business name, status | Yes | Stub |
+| Japan Corporate Number | Japanese entities | Corporate number, name, address | Yes | Stub |
+| Singapore ACRA Open Data | Singapore entities | UEN, entity name, status | Usually no key or optional | Stub |
+| Corporations Canada | Canadian federal corporations | Corporation number and profile | Public plan key | Stub |
+| Guardian Open Platform | News | News supplement | Yes | Stub |
+| NewsAPI | News aggregation | News supplement | Yes | Stub |
+| RSS / Atom | User-configured public feeds | News fallback | No | Future/stub |
+
+## Region Coverage Strategy
+
+- United States: Nasdaq Symbol Directory, FMP, Alpha Vantage, GLEIF, Marketaux/RSS.
+- United Kingdom: Companies House, OpenCorporates, GLEIF, Marketaux/RSS.
+- France and Europe: GLEIF, OpenCorporates, FMP, Marketaux/RSS; INSEE SIRENE remains a stub.
+- Canada: Corporations Canada remains a stub; fallback sources are GLEIF, OpenCorporates, Marketaux/RSS.
+- Australia: ABN Lookup remains a stub; fallback sources are GLEIF, OpenCorporates, Marketaux/RSS.
+- Japan: Corporate Number remains a stub; fallback sources are GLEIF, OpenCorporates, Marketaux/RSS.
+- Singapore: ACRA/data.gov.sg remains a stub; fallback sources are GLEIF and Marketaux/RSS.
+- Norway: BRREG, GLEIF, OpenCorporates, Marketaux/RSS.
+- Complex regions such as China, India, Brazil, and Germany are not handled through fragile website scraping or login-protected pages.
+
+## API Key Storage
+
+API keys are stored at:
+
+```text
+%APPDATA%\CompanyDecisionMonitor\api_keys.json
+```
+
+They are stored only on the local machine. Logs and cache keys do not include plaintext keys. The installer does not include user keys, cache files, watchlist data, or `.env`.
+
+## Run
+
+Development mode:
+
+```bat
+run_dev.bat
+```
+
+Run the built executable:
+
+```bat
+dist\CompanyDecisionMonitor\CompanyDecisionMonitor.exe
+```
+
+## Test
+
+```bat
+ruff check src tests scripts
+pytest
+python -m compileall src scripts
+```
+
+Tests do not call external APIs. They use local mappings and mocked responses.
+
+## Build And Package
+
+```bat
+build.bat
+```
+
+Build outputs:
+
+- `dist\CompanyDecisionMonitor\CompanyDecisionMonitor.exe`
+- `dist\CompanyDecisionMonitor_Portable.zip`
+- `dist\installer\CompanyDecisionMonitor_Setup.exe`
+
+The installer should not contain `.env`, user API keys, cache directories, watchlist data, tests, source directories, `.git`, or `node_modules`.
+
+## Not Implemented Yet
+
+- Full financial modeling.
+- Full risk rule engine.
+- AI summaries.
+- Research report export.
+- Full request mapping for Guardian, NewsAPI, INSEE, ABN, Japan NTA, Singapore ACRA, and Canada providers.
+- Deep official registry integration for complex regions such as China, India, Brazil, and Germany.
+
+## Notes
+
+- Free-tier limits, fields, registration flows, and terms may change. Always refer to the official provider pages.
+- Search results come from external providers and should be verified against original sources.
+- This software does not constitute investment advice.
+
+---
+
+## 中文说明
+
 当前版本：`v0.1.1`  
 当前模式：`Public + Free API Network Mode`
 
