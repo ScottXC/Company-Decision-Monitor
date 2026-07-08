@@ -12,7 +12,7 @@ from package_portable import PortablePackageResult, create_portable_zip
 
 APP_NAME = "CompanyDecisionMonitor"
 EXE_NAME = "CompanyDecisionMonitor.exe"
-VERSION_NAME = "v0.1.0-ui-preview"
+VERSION_NAME = "v0.1.1-public-free-api-network"
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,19 @@ def _tool(name: str) -> str:
     return resolved or name
 
 
+def _python_runtime_dlls() -> list[Path]:
+    library_bin = Path(sys.prefix) / "Library" / "bin"
+    names = [
+        "libcrypto-3-x64.dll",
+        "libssl-3-x64.dll",
+        "ffi.dll",
+        "libexpat.dll",
+        "liblzma.dll",
+        "libbz2.dll",
+    ]
+    return [library_bin / name for name in names if (library_bin / name).exists()]
+
+
 def _phase(title: str) -> None:
     print("")
     print("=" * 72)
@@ -154,6 +167,8 @@ def _pyinstaller_command(root: Path) -> list[str]:
         "pip_audit",
     ]:
         command.extend(["--exclude-module", module])
+    for dll in _python_runtime_dlls():
+        command.extend(["--add-binary", f"{dll};."])
     command.extend(
         [
             "--add-data",
@@ -197,7 +212,7 @@ def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
     if file_count < 5:
         raise RuntimeError(f"PyInstaller output looks incomplete: only {file_count} files found")
     print(f"PyInstaller files: {file_count}")
-    print("Config files: not required for UI Preview Mode")
+    print("Config files: user API keys are stored only in AppData and are not packaged")
     print("Old product data check: no source/test directories are included in dist output")
 
 

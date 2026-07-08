@@ -4,15 +4,7 @@ from collections.abc import Callable
 
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from cdm_desktop.ui.components import (
-    EmptyState,
-    MetricCard,
-    PageHeader,
-    PlaceholderChart,
-    PlaceholderTable,
-    metric_grid,
-    scroll_container,
-)
+from cdm_desktop.ui.components import EmptyState, PageHeader, PreviewNotice, scroll_container
 
 
 class RiskMonitorPage(QWidget):
@@ -21,7 +13,6 @@ class RiskMonitorPage(QWidget):
 
     def __init__(self, navigate: Callable[[str], None]) -> None:
         super().__init__()
-        self.navigate = navigate
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         scroll, _content, layout = scroll_container()
@@ -29,26 +20,16 @@ class RiskMonitorPage(QWidget):
         layout.addWidget(
             PageHeader(
                 "风险监控",
-                "未来用于集中展示重大事件、监管风险、财务风险、舆情风险和供应链风险。",
+                "风险规则引擎暂未接入。当前页面仅说明后续会基于真实公告、新闻和注册数据生成风险信号。",
+                primary_text="返回首页",
+                primary_action=lambda: navigate("/dashboard"),
             )
         )
+        layout.addWidget(PreviewNotice())
         layout.addWidget(
-            metric_grid(
-                [
-                    MetricCard("高风险", "0", "等待风险规则"),
-                    MetricCard("中风险", "0", "等待风险规则"),
-                    MetricCard("新增信号", "0", "等待数据源"),
-                    MetricCard("待确认", "0", "等待人工复核流程"),
-                ]
-            )
-        )
-        layout.addWidget(EmptyState("暂无风险信号", "接入风险规则和公司动态数据后显示潜在风险信号。"))
-        layout.addWidget(PlaceholderChart("风险趋势占位", "未来展示不同风险类型随时间变化。"))
-        layout.addWidget(
-            PlaceholderTable(
-                "风险信号列表结构",
-                ["公司", "风险类型", "等级", "触发依据", "证据", "更新时间", "操作"],
-                "当前不执行真实风险检测，也不展示伪造风险事件。",
+            EmptyState(
+                "风险规则引擎暂未接入",
+                "不会显示假风险等级。后续接入时将展示 provider、证据、更新时间和规则解释。",
             )
         )
         layout.addStretch()

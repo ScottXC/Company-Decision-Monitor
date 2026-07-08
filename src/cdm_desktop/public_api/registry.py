@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+from cdm_desktop.public_api.models import ApiKeyDefinition, ProviderMeta
+
+
+class ProviderRegistry:
+    def __init__(self) -> None:
+        self.providers = _providers()
+
+    def all(self) -> list[ProviderMeta]:
+        return list(self.providers)
+
+    def implemented(self) -> list[ProviderMeta]:
+        return [provider for provider in self.providers if provider.implemented]
+
+    def key_definitions(self) -> list[ApiKeyDefinition]:
+        items: list[ApiKeyDefinition] = []
+        for provider in self.providers:
+            if provider.key_name:
+                items.append(
+                    ApiKeyDefinition(
+                        key_name=provider.key_name,
+                        label=provider.display_name,
+                        provider_id=provider.provider_id,
+                        registration_url=provider.registration_url,
+                        help_text=provider.notes or provider.purpose,
+                    )
+                )
+        return items
+
+
+def _providers() -> list[ProviderMeta]:
+    return [
+        ProviderMeta(
+            "gleif",
+            "GLEIF LEI",
+            "global",
+            "全球 LEI 法人实体",
+            "LEI、法人名称、注册状态、司法辖区",
+            False,
+            None,
+            "公开免费",
+            "https://www.gleif.org/en/lei-data/gleif-api",
+            True,
+        ),
+        ProviderMeta(
+            "opencorporates",
+            "OpenCorporates",
+            "global",
+            "140+ jurisdictions 注册企业",
+            "全球注册企业搜索、jurisdiction、company number",
+            True,
+            "OPENCORPORATES_API_TOKEN",
+            "可能需要 public benefit/trial/paid plan，以官方说明为准",
+            "https://api.opencorporates.com/documentation/API-Reference",
+            True,
+        ),
+        ProviderMeta(
+            "fmp",
+            "Financial Modeling Prep",
+            "financial",
+            "全球上市公司和证券数据",
+            "symbol search、company profile、新闻",
+            True,
+            "FMP_API_KEY",
+            "免费层限制以官方为准",
+            "https://site.financialmodelingprep.com/developer/docs",
+            True,
+        ),
+        ProviderMeta(
+            "alpha_vantage",
+            "Alpha Vantage",
+            "financial",
+            "全球主流上市证券",
+            "SYMBOL_SEARCH、OVERVIEW",
+            True,
+            "ALPHA_VANTAGE_API_KEY",
+            "免费 API key，额度以官方为准",
+            "https://www.alphavantage.co/support/#api-key",
+            True,
+        ),
+        ProviderMeta(
+            "nasdaq_directory",
+            "Nasdaq Symbol Directory",
+            "financial",
+            "美国上市证券目录",
+            "Nasdaq Trader 公共 symbol directory fallback",
+            False,
+            None,
+            "公开文件",
+            "https://www.nasdaqtrader.com/trader.aspx?id=symboldirdefs",
+            True,
+        ),
+        ProviderMeta(
+            "marketaux",
+            "Marketaux",
+            "news",
+            "全球财经新闻",
+            "公司新闻、市场新闻、媒体提及",
+            True,
+            "MARKETAUX_API_KEY",
+            "免费层限制以官方为准",
+            "https://www.marketaux.com/account/dashboard",
+            True,
+        ),
+        ProviderMeta(
+            "guardian",
+            "Guardian Open Platform",
+            "news",
+            "Guardian 新闻",
+            "公开新闻补充源",
+            True,
+            "GUARDIAN_API_KEY",
+            "免费 key，需遵守官方条款",
+            "https://open-platform.theguardian.com/access/",
+            False,
+            notes="v0.1.1 registry/stub，后续接入。",
+        ),
+        ProviderMeta(
+            "newsapi",
+            "NewsAPI",
+            "news",
+            "全球新闻聚合",
+            "新闻搜索补充源",
+            True,
+            "NEWSAPI_API_KEY",
+            "免费层限制严格，以官方为准",
+            "https://newsapi.org/register",
+            False,
+            notes="v0.1.1 registry/stub，后续接入。",
+        ),
+        ProviderMeta(
+            "companies_house",
+            "UK Companies House",
+            "registry",
+            "United Kingdom",
+            "英国公司注册信息",
+            True,
+            "COMPANIES_HOUSE_API_KEY",
+            "公共 API 免费但需要 authentication",
+            "https://developer.company-information.service.gov.uk/get-started",
+            True,
+        ),
+        ProviderMeta(
+            "insee",
+            "France INSEE SIRENE",
+            "registry",
+            "France",
+            "SIREN/SIRET、legal unit、establishment",
+            True,
+            "INSEE_API_KEY",
+            "认证规则以官方为准",
+            "https://portail-api.insee.fr/",
+            False,
+            notes="v0.1.1 registry/stub，认证规则较复杂。",
+        ),
+        ProviderMeta(
+            "abn",
+            "Australia ABN Lookup",
+            "registry",
+            "Australia",
+            "ABN validation、business name、entity status",
+            True,
+            "ABN_LOOKUP_GUID",
+            "官方 GUID 可申请",
+            "https://abr.business.gov.au/Documentation/WebServiceRegistration",
+            False,
+            notes="v0.1.1 registry/stub，后续接入 SOAP/XML 映射。",
+        ),
+        ProviderMeta(
+            "japan_nta",
+            "Japan Corporate Number",
+            "registry",
+            "Japan",
+            "Corporate number、company name、address",
+            True,
+            "JAPAN_CORPORATE_NUMBER_APP_ID",
+            "应用 ID 免费申请",
+            "https://www.houjin-bangou.nta.go.jp/webapi/index.html",
+            False,
+            notes="v0.1.1 registry/stub，后续接入。",
+        ),
+        ProviderMeta(
+            "singapore_acra",
+            "Singapore ACRA Open Data",
+            "registry",
+            "Singapore",
+            "UEN、entity name、status",
+            False,
+            None,
+            "公开数据集，按 data.gov.sg 规则",
+            "https://data.gov.sg/dataset/acra-information-on-corporate-entities",
+            False,
+            notes="v0.1.1 registry/stub，可缓存公开下载数据。",
+        ),
+        ProviderMeta(
+            "norway_brreg",
+            "Norway BRREG",
+            "registry",
+            "Norway",
+            "organization number、legal name、address",
+            False,
+            None,
+            "公开 API",
+            "https://data.brreg.no/enhetsregisteret/api/dokumentasjon/en/index.html",
+            True,
+        ),
+        ProviderMeta(
+            "canada_corporations",
+            "Corporations Canada",
+            "registry",
+            "Canada",
+            "federal corporation profile",
+            True,
+            "CANADA_CORPORATIONS_API_KEY",
+            "需要 API Store Public Plan",
+            "https://api.ised-isde.canada.ca/en/docs?api=corporations",
+            False,
+            notes="v0.1.1 registry/stub，需官方 Public Plan。",
+        ),
+        ProviderMeta(
+            "rss",
+            "RSS / Atom News",
+            "news",
+            "用户配置公开 RSS",
+            "新闻 fallback",
+            False,
+            None,
+            "公开 RSS",
+            "https://www.rssboard.org/rss-specification",
+            True,
+        ),
+    ]

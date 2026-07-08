@@ -4,13 +4,7 @@ from collections.abc import Callable
 
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from cdm_desktop.ui.components import (
-    EmptyState,
-    PageHeader,
-    PlaceholderTable,
-    PreviewNotice,
-    scroll_container,
-)
+from cdm_desktop.ui.components import EmptyState, PageHeader, PreviewNotice, scroll_container
 
 
 class AiSummaryPage(QWidget):
@@ -19,7 +13,6 @@ class AiSummaryPage(QWidget):
 
     def __init__(self, navigate: Callable[[str], None]) -> None:
         super().__init__()
-        self.navigate = navigate
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         scroll, _content, layout = scroll_container()
@@ -27,21 +20,16 @@ class AiSummaryPage(QWidget):
         layout.addWidget(
             PageHeader(
                 "AI 总结",
-                "未来用于对公司资料、公告证据和风险事件进行摘要。当前不调用任何 LLM 或外部服务。",
+                "AI 总结暂未接入。未来只用于总结真实 provider 返回的证据，不参与事实识别或投资建议。",
+                primary_text="返回首页",
+                primary_action=lambda: navigate("/dashboard"),
             )
         )
         layout.addWidget(PreviewNotice())
         layout.addWidget(
             EmptyState(
-                "暂无 AI 总结",
-                "接入 LLM 后可生成公司摘要和事件解读。AI 输出将被标注为仅供参考，并以原文证据为准。",
-            )
-        )
-        layout.addWidget(
-            PlaceholderTable(
-                "AI 总结任务结构",
-                ["公司", "摘要类型", "输入来源", "状态", "更新时间", "操作"],
-                "当前版本不使用 API key，不上传本地数据，不生成 AI 内容。",
+                "AI 总结暂未接入",
+                "当前不会调用任何 LLM，也不会保存 AI key。后续接入时会明确标注“AI 摘要，仅供参考”。",
             )
         )
         layout.addStretch()

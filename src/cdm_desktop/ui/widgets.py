@@ -54,6 +54,7 @@ ALERT_STATUS_LABELS = {
 class WorkerSignals(QObject):
     finished = Signal(object)
     error = Signal(str)
+    progress = Signal(int, int, str)
 
 
 class FunctionWorker(QRunnable):
@@ -67,9 +68,32 @@ class FunctionWorker(QRunnable):
     @Slot()
     def run(self) -> None:
         try:
-            self.signals.finished.emit(self.func(*self.args, **self.kwargs))
+            result = self.func(*self.args, **self.kwargs)
+            try:
+                self.signals.finished.emit(result)
+            except RuntimeError:
+                return
         except Exception:
-            self.signals.error.emit(traceback.format_exc())
+            try:
+                self.signals.error.emit(traceback.format_exc())
+            except RuntimeError:
+                return
+
+
+class ProgressFunctionWorker(FunctionWorker):
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self.func(*self.args, progress_callback=self.signals.progress.emit, **self.kwargs)
+            try:
+                self.signals.finished.emit(result)
+            except RuntimeError:
+                return
+        except Exception:
+            try:
+                self.signals.error.emit(traceback.format_exc())
+            except RuntimeError:
+                return
 
 
 def priority_label(priority: str | None) -> str:

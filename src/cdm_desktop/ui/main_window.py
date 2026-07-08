@@ -16,16 +16,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cdm_desktop import PREVIEW_MODE_LABEL, PRODUCT_NAME_ZH
+from cdm_desktop import APP_MODE_LABEL, PRODUCT_NAME_ZH
 from cdm_desktop.paths import AppPaths
+from cdm_desktop.public_api.models import CompanyResult
 from cdm_desktop.store import PreviewUiState
 from cdm_desktop.ui.components import StatusBadge, show_preview_message
 from cdm_desktop.ui.pages import (
-    AiSummaryPage,
     CompanyDetailPage,
     DashboardPage,
-    HotCompaniesPage,
-    RiskMonitorPage,
     SearchPage,
     SettingsPage,
     WatchlistPage,
@@ -46,28 +44,46 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
+        sidebar_shell = QWidget()
+        sidebar_shell.setObjectName("SidebarShell")
+        sidebar_shell.setFixedWidth(228)
+        sidebar_layout = QVBoxLayout(sidebar_shell)
+        sidebar_layout.setContentsMargins(18, 18, 18, 18)
+        sidebar_layout.setSpacing(10)
+        product = QLabel("CDM Research")
+        product.setObjectName("SidebarTitle")
+        product.setWordWrap(True)
+        sidebar_layout.addWidget(product)
+        subtitle = QLabel("Company Decision Monitor")
+        subtitle.setObjectName("SidebarSubtitle")
+        sidebar_layout.addWidget(subtitle)
+        sidebar_layout.addWidget(StatusBadge(APP_MODE_LABEL, "info"))
+
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(220)
-        root_layout.addWidget(self.sidebar)
+        sidebar_layout.addWidget(self.sidebar, 1)
+        root_layout.addWidget(sidebar_shell)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(20, 16, 20, 18)
-        content_layout.setSpacing(14)
+        content_layout.setContentsMargins(22, 16, 22, 18)
+        content_layout.setSpacing(12)
         root_layout.addWidget(content, 1)
 
         header = QHBoxLayout()
-        self.page_title = QLabel("首页 Dashboard")
+        header.setSpacing(12)
+        self.page_title = QLabel("工作台")
         self.page_title.setObjectName("PageTitle")
         header.addWidget(self.page_title)
+        header.addWidget(StatusBadge("公开数据源", "success"))
+        header.addWidget(StatusBadge(APP_MODE_LABEL, "info"))
         header.addStretch()
         self.global_search = QLineEdit()
-        self.global_search.setPlaceholderText("搜索公司、行业、关键词...")
-        self.global_search.setMinimumWidth(360)
+        self.global_search.setPlaceholderText("搜索公司、股票代码、简称、缩写、LEI 或注册号...")
+        self.global_search.setMinimumWidth(260)
+        self.global_search.setMaximumWidth(460)
         self.global_search.returnPressed.connect(self._submit_global_search)
         header.addWidget(self.global_search, 1)
-        header.addWidget(StatusBadge(PREVIEW_MODE_LABEL, "info"))
         settings_btn = QPushButton("设置")
         settings_btn.clicked.connect(lambda: self.navigate("/settings"))
         header.addWidget(settings_btn)
@@ -77,20 +93,32 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
 
+        self.company_detail_page = CompanyDetailPage(self.navigate, paths)
+        self.search_page = SearchPage(
+            self.navigate,
+            paths,
+            on_company_selected=self._open_company_detail,
+            on_watchlist_changed=self._refresh_watchlist,
+        )
+        self.watchlist_page = WatchlistPage(
+            self.navigate,
+            paths,
+            on_company_selected=self._open_company_detail,
+        )
+        self.dashboard_page = DashboardPage(self.navigate, paths)
+        self.settings_page = SettingsPage(self.navigate, paths)
+
         self.routes: list[tuple[str, str, QWidget]] = [
-            ("/dashboard", "首页", DashboardPage(self.navigate)),
-            ("/search", "公司搜索", SearchPage(self.navigate)),
-            ("/company/placeholder", "公司详情", CompanyDetailPage(self.navigate)),
-            ("/watchlist", "自选公司", WatchlistPage(self.navigate)),
-            ("/hot-companies", "热门公司", HotCompaniesPage(self.navigate)),
-            ("/risk-monitor", "风险监控", RiskMonitorPage(self.navigate)),
-            ("/ai-summary", "AI 总结", AiSummaryPage(self.navigate)),
-            ("/settings", "设置", SettingsPage(self.navigate, paths)),
+            ("/dashboard", "工作台", self.dashboard_page),
+            ("/search", "搜索公司", self.search_page),
+            ("/watchlist", "自选清单", self.watchlist_page),
+            ("/company/placeholder", "公司档案", self.company_detail_page),
+            ("/settings", "数据源设置", self.settings_page),
         ]
         self.route_index = {route: index for index, (route, _label, _page) in enumerate(self.routes)}
         for _route, label, page in self.routes:
             item = QListWidgetItem(label)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             self.sidebar.addItem(item)
             self.stack.addWidget(page)
         self.sidebar.currentRowChanged.connect(self._show_index)
@@ -99,27 +127,34 @@ class MainWindow(QMainWindow):
     def navigate(self, route: str) -> None:
         index = self.route_index.get(route)
         if index is None:
-            if route.startswith("/company/"):
-                index = self.route_index["/company/placeholder"]
-            else:
-                index = self.route_index["/dashboard"]
+            index = self.route_index["/company/placeholder"] if route.startswith("/company/") else 0
         self.sidebar.setCurrentRow(index)
 
     def _show_index(self, index: int) -> None:
         if index < 0:
             return
         self.stack.setCurrentIndex(index)
-        route, _label, page = self.routes[index]
+        route, label, page = self.routes[index]
         self.state.current_route = route
-        self.page_title.setText(getattr(page, "page_title", _label))
+        self.page_title.setText(getattr(page, "page_title", label))
+        refresh: Callable[[], None] | None = getattr(page, "refresh", None)
+        if callable(refresh):
+            refresh()
 
     def _submit_global_search(self) -> None:
         keyword = self.global_search.text().strip()
         self.state.search_keyword = keyword
         self.navigate("/search")
-        page = self.stack.currentWidget()
-        set_query: Callable[[str], None] | None = getattr(page, "set_query", None)
-        if callable(set_query):
-            set_query(keyword)
-        if not keyword:
+        self.search_page.set_query(keyword)
+        if keyword:
+            self.search_page.run_search()
+        else:
             show_preview_message(self, "全局搜索")
+
+    def _open_company_detail(self, result: CompanyResult) -> None:
+        self.company_detail_page.set_company(result)
+        self.navigate("/company/placeholder")
+
+    def _refresh_watchlist(self) -> None:
+        self.watchlist_page.refresh()
+        self.dashboard_page.refresh()

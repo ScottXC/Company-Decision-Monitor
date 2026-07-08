@@ -9,7 +9,7 @@ def main() -> int:
         for child in cache_root.iterdir():
             if child.is_dir():
                 print(f"Cache directory present: {child}")
-    print("UI Preview Mode: cache cleanup is a placeholder for future local UI cache.")
+    print("Public + Free API Network Mode: use the Settings page to clear public API cache.")
     return 0
 
 

@@ -1,46 +1,32 @@
-# 数据源规划
+# Data Source Plan
 
-## 当前版本
+v0.1.1 使用 Public + Free API Network Mode。
 
-当前版本不接入真实数据源，不执行真实联网搜索，不运行真实爬虫，不调用外部 API。
+## 已接入或基础映射
 
-## 未来公司搜索
+- GLEIF LEI。
+- Nasdaq Symbol Directory。
+- Financial Modeling Prep。
+- Alpha Vantage。
+- Marketaux。
+- OpenCorporates。
+- UK Companies House。
+- Norway BRREG。
 
-可考虑接入：
+## Registry / Stub
 
-- 公开交易所证券列表
-- 公司官网公开信息
-- 用户手动导入公司清单
-- 企业公告公开页面
+- INSEE SIRENE。
+- Australia ABN Lookup。
+- Japan Corporate Number。
+- Singapore ACRA Open Data。
+- Corporations Canada。
+- Guardian Open Platform。
+- NewsAPI。
 
-## 未来财务数据
+## 禁止路线
 
-可考虑接入：
-
-- 公司公告中的财务报告
-- 用户导入的财务表格
-- 合规的公开财务数据源
-
-## 未来新闻数据
-
-可考虑接入：
-
-- 用户配置 RSS
-- 公司 IR 新闻页
-- 公开新闻源
-
-## 未来风险事件
-
-可考虑接入：
-
-- 公告关键词规则
-- 监管处罚和问询公开页面
-- 诉讼、破产、债务风险公开资料
-
-## 未来 LLM 总结
-
-LLM 仅用于总结已采集证据和解释事件，不应替代事实识别、风险判断或用户核验。
-
-## 边界
-
-任何未来数据源接入都不得引入交易功能、投资建议、自动下单或收益预测。
+- 不要求用户导入 Excel。
+- 不要求用户导入 CSV。
+- 不要求用户准备本地公司数据库。
+- 不抓取需要登录、验证码或绕过访问限制的网站。
+- 不把付费 API 写成永久免费。

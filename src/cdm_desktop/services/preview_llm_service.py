@@ -4,7 +4,7 @@ from __future__ import annotations
 async def summarize_company(company_id: str) -> str | None:
     """Future extension point for optional LLM summaries.
 
-    No model, API key, or remote call is used in UI Preview Mode.
+    Compatibility placeholder. Public + Free API Network Mode does not enable LLM summary yet.
     """
 
     _ = company_id

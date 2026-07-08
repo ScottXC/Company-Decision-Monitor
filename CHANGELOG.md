@@ -1,16 +1,17 @@
 # Changelog
 
+## 0.1.1 - 2026-07-07
+
+- 升级为 Public + Free API Network Mode。
+- 新增免费 API key 本机配置、masking 和清除能力。
+- 新增 provider registry、provider 状态、缓存和 HTTP 错误映射。
+- 新增 FMP、Alpha Vantage、Marketaux、GLEIF、Wikidata、Nasdaq、OpenCorporates、Companies House、Norway BRREG 的基础映射或请求入口。
+- 新增自选公司本机持久化。
+- 搜索页、详情页、首页、设置页接入真实 provider 服务。
+- 更新 README、release notes 和数据源计划。
+
 ## 0.1.0 - 2026-06-26
 
-- Initial Windows desktop MVP scaffold.
-- Added local SQLite schema, PySide6 shell, ingestion, parsing, event detection, alerts, exports, scheduler, tests, and packaging scripts.
-- Added self-selected company search/list workflow, hot company recommendations, event/alert delete actions, and a local recycle bin with restore/permanent delete.
-- Improved card scaling and compact self-selected company rows for denser desktop usage.
-- Replaced popup company search with a right-side drawer search panel.
-- Added explicit online company lookup from the drawer search panel.
-- Removed built-in demo company/document/source content from product code and documentation.
-- Hardened event, alert, watchlist, and source delete actions with real recycle-bin persistence and user-facing failure messages.
-- Replaced local company discovery with a dedicated API-key-free `联网搜索` module.
-- Added SEC, Nasdaq Trader, HKEX securities, Stock Connect, RSS, and user-configured IR search provider architecture.
-- Added online search cache/settings tables and provider controls under `设置 → 联网搜索`.
-- Removed the old generic quote-search client and local company discovery service from product code.
+- 完成 Windows 桌面端 UI 预览版。
+- 完成 PyInstaller exe、portable zip 和 Inno Setup installer。
+- 清理旧 demo 数据和伪造公司数据。

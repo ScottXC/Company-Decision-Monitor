@@ -1,10 +1,13 @@
 # Changelog
 
-## 0.1.0-ui-preview
+## v0.1.1
 
-- 重构为 UI Preview Mode。
-- 新增正式 AppShell、页面路由、侧栏和全局搜索。
-- 新增 Dashboard、Search、Company Detail、Watchlist、Hot Companies、Risk Monitor、AI Summary、Settings 页面。
-- 新增可复用 UI 组件和预览服务接口。
-- 移除可见旧业务入口，不再触发真实搜索、采集、爬虫、数据库业务写入或 LLM。
-- 清理文档，明确当前版本不包含真实公司数据和投资建议。
+- 升级为 Public + Free API Network Mode。
+- 新增免费 API key 配置入口。
+- 新增 provider registry 和搜索聚合服务。
+- 新增 key masking、缓存、错误映射和自选持久化。
+
+## v0.1.0
+
+- Windows 桌面端 UI 预览版。
+- 完成基础页面、构建脚本和安装包。
