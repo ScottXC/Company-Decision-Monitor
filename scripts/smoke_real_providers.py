@@ -75,7 +75,7 @@ def main() -> int:
         _run_provider_checks(provider_id, provider, results, masked)
 
     report = {
-        "version": "v0.1.2-rc2",
+        "version": "v0.1.2",
         "mode": "Public + Free API Network Mode",
         "results": results,
         "summary": _summary(results),

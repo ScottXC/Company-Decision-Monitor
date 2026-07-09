@@ -81,7 +81,7 @@ def main() -> int:
     checks.append({"check": "installer_script_references", "status": "passed" if not installer_failures else "failed", "failures": installer_failures})
 
     report = {
-        "version": "v0.1.2-rc2",
+        "version": "v0.1.2",
         "checks": checks,
         "failures": failures,
         "artifacts": {

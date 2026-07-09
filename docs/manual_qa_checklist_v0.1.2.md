@@ -1,9 +1,9 @@
-# Manual QA Checklist - v0.1.2-rc2
+# Manual QA Checklist - v0.1.2
 
-Release candidate: `v0.1.2-rc2`
+Release: `v0.1.2`
 Mode: `Public + Free API Network Mode`
 
-Use this checklist for manual validation before promoting the release candidate to a formal non-RC release.
+Use this checklist for manual validation before publishing the formal GitHub release.
 
 ## Installation And Launch
 
@@ -87,7 +87,7 @@ Use this checklist for manual validation before promoting the release candidate 
 - [ ] Artifacts do not contain user watchlist data.
 - [ ] Artifacts do not contain tests or source directories.
 
-## Release Candidate Decision
+## Release Decision
 
 - [ ] `ruff check src tests scripts` passed.
 - [ ] `pytest` passed.

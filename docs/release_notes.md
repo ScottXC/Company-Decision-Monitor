@@ -1,8 +1,20 @@
 # Release Notes
 
-## v0.1.2-rc2 - Release Candidate Validation
+## v0.1.2 - Stable Release
 
-Release type: release candidate for `Public + Free API Network Mode`.
+Release type: stable release for `Public + Free API Network Mode`.
+
+### Release Validation Status - 2026-07-09
+
+- `ruff check src tests scripts`: passed.
+- `pytest`: passed, 54 tests.
+- `python -m compileall src scripts`: passed.
+- `build.bat`: passed; exe, portable zip, and Inno Setup installer were regenerated.
+- `scripts/validate_release_artifacts.py`: passed.
+- `scripts/hash_release_artifacts.py`: passed.
+- `scripts/smoke_real_providers.py`: passed with no failed providers; FMP was skipped because no local key was configured.
+- `scripts/smoke_user_flow.py`: passed end-to-end with temporary storage.
+- No P0/P1/P2 release-blocking issue was found during freeze validation.
 
 ### Completed
 

@@ -1,8 +1,8 @@
-# Release Validation - v0.1.2-rc2
+# Release Validation - v0.1.2
 
 ## Validation Goal
 
-`v0.1.2-rc2` is a release candidate for the core public-network function loop. The goal is to validate provider-backed search, company profiles, related news, watchlist persistence, cache fallback, API key safety, Xueqiu external handoff, and Windows delivery artifacts before promoting a formal non-RC release.
+`v0.1.2` is the stable release for the core public-network function loop. The goal is to validate provider-backed search, company profiles, related news, watchlist persistence, cache fallback, API key safety, Xueqiu external handoff, and Windows delivery artifacts before publishing the GitHub release.
 
 ## Automated Tests
 
