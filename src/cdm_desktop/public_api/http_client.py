@@ -12,7 +12,7 @@ class PublicHttpClient:
     def __init__(
         self,
         *,
-        user_agent: str = "CompanyDecisionMonitor/0.1.2-core-functions",
+        user_agent: str = "CompanyDecisionMonitor/0.1.2-rc2",
         timeout_seconds: float = 15.0,
         retry_count: int = 2,
     ) -> None:

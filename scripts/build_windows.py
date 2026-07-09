@@ -12,7 +12,7 @@ from package_portable import PortablePackageResult, create_portable_zip
 
 APP_NAME = "CompanyDecisionMonitor"
 EXE_NAME = "CompanyDecisionMonitor.exe"
-VERSION_NAME = "v0.1.2-core-functions"
+VERSION_NAME = "v0.1.2-rc2"
 
 
 @dataclass(frozen=True)

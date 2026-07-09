@@ -81,3 +81,7 @@ yarn-error.log*
 *.zip
 *.7z
 *.rar
+
+# Local release validation reports
+reports/*
+!reports/README.md

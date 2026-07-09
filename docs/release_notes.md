@@ -1,17 +1,34 @@
 # Release Notes
 
-## v0.1.2-rc1 - Xueqiu External Community Link
+## v0.1.2-rc2 - Release Candidate Validation
 
-Release type: compliance-bounded external source entry for `v0.1.2-core-functions`.
+Release type: release candidate for `Public + Free API Network Mode`.
 
 ### Completed
 
+- Confirmed FMP company profile and news mapping.
+- Confirmed Alpha Vantage symbol search and overview mapping.
+- Confirmed Marketaux news mapping.
+- Confirmed Nasdaq Symbol Directory fallback.
+- Confirmed Wikidata / Wikipedia fallback.
+- Confirmed GLEIF legal entity fallback.
+- Confirmed search aggregation and result grouping.
+- Confirmed company detail field merging and field-level provider source tracking.
+- Confirmed company news aggregation and de-duplication.
+- Confirmed watchlist add, remove, refresh one, and refresh all flows.
+- Confirmed cache fallback and stale-cache paths.
+- Confirmed API key masking, cache-key redaction, provider error safety, and smoke report redaction.
 - Added Xueqiu external community link provider.
 - Added safe symbol-to-Xueqiu URL generation for A-share, Hong Kong, and U.S. symbols.
 - Added a Company Profile card for "雪球社区入口".
 - Added a secondary search-result action under the advanced fields area when a direct stock link can be generated.
 - Added Settings provider status for "雪球社区入口" as an external link source that requires no API key.
-- Added release artifact validation for forbidden Xueqiu token/cookie markers.
+- Added release artifact validation for exe, portable zip, installer, forbidden user data, and forbidden Xueqiu token/cookie markers.
+- Added real provider smoke script.
+- Added user-flow smoke script.
+- Added SHA256 hash generation script.
+- Added manual QA checklist.
+- Added release validation guide.
 
 ### Compliance Boundary
 
@@ -21,6 +38,15 @@ Release type: compliance-bounded external source entry for `v0.1.2-core-function
 - It does not use user cookies or tokens.
 - It does not cache, index, store, summarize, train on, or ingest Xueqiu content into AI/RAG flows.
 - It is not counted as a real news provider and is not included in news freshness counts.
+
+### Not Complete In This RC
+
+- AI summaries.
+- Risk rule engine.
+- Research report export.
+- Commercial-grade full financial data coverage.
+- Complete implementation for most country-specific official registry providers.
+- Deep official Xueqiu API integration.
 
 ## v0.1.2-core-functions - Core Function Loop
 
