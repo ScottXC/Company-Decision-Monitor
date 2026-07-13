@@ -4,10 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "company-decision-monitor"
-version = "0.1.2"
+version = "0.1.3"
 description = "Windows desktop app for monitoring major corporate decisions"
 requires-python = ">=3.12"
 readme = "README.md"
+
+[project.optional-dependencies]
+build-symbol-index = [
+    "FinanceDatabase>=2.4,<3",
+]
+open-source-data = [
+    "rapidfuzz>=3.14,<4",
+    "cleanco>=2.3,<3",
+]
+china-hk-experimental = [
+    "akshare",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

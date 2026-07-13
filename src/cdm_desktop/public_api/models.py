@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-ProviderCategory = Literal["global", "registry", "financial", "news", "fallback", "external_link"]
+ProviderCategory = Literal[
+    "global",
+    "registry",
+    "financial",
+    "news",
+    "fallback",
+    "external_link",
+    "symbol_universe",
+    "experimental",
+    "web_evidence",
+]
 ProviderState = Literal[
     "enabled",
     "not_configured",
@@ -21,6 +31,9 @@ ProviderState = Literal[
     "parse_error",
     "provider_unavailable",
     "cache_miss",
+    "dependency_missing",
+    "index_missing",
+    "index_corrupted",
 ]
 
 
@@ -57,7 +70,15 @@ class ProviderStatus:
     state: ProviderState
     message: str
     last_error: str = ""
-    checked_at: datetime = field(default_factory=datetime.utcnow)
+    checked_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    last_checked_at: str = ""
+    last_success_at: str = ""
+    last_error_at: str = ""
+    last_error_type: str = ""
+    last_error_message: str = ""
+    consecutive_failures: int = 0
+    disabled_until: str = ""
+    average_latency_ms: int = 0
 
 
 @dataclass
@@ -189,6 +210,7 @@ class NewsItem:
     sentiment_score: float | None = None
     entities: list[dict[str, Any]] = field(default_factory=list)
     from_cache: bool = False
+    relevance_score: int = 0
 
     def dedupe_key(self) -> str:
         if self.url:
@@ -213,6 +235,7 @@ class NewsItem:
             "sentiment_score": self.sentiment_score,
             "entities": self.entities,
             "from_cache": self.from_cache,
+            "relevance_score": self.relevance_score,
         }
 
     @classmethod
@@ -233,6 +256,7 @@ class NewsItem:
             sentiment_score=float(sentiment) if sentiment not in (None, "") else None,
             entities=[dict(item) for item in data.get("entities", []) if isinstance(item, dict)],
             from_cache=bool(data.get("from_cache") or False),
+            relevance_score=int(data.get("relevance_score") or 0),
         )
 
 
@@ -254,114 +278,146 @@ class ExternalSourceLink:
 
 @dataclass
 class CompanyProfile:
+    schema_version: int = 4
+    id: str = ""
     display_name: str = ""
+    legal_name: str = ""
+    short_name: str = ""
+    aliases: list[str] = field(default_factory=list)
+    logo_url: str = ""
+    company_type: str = ""
+    entity_type: str = ""
     symbol: str = ""
+    normalized_symbol: str = ""
     exchange: str = ""
     market: str = ""
+    region: str = ""
+    instrument_type: str = ""
+    is_listed: bool | None = None
     lei: str = ""
+    registration_number: str = ""
+    company_number: str = ""
+    registry_number: str = ""
+    jurisdiction: str = ""
+    registration_status: str = ""
+    entity_status: str = ""
     wikidata_id: str = ""
     wikipedia_url: str = ""
     website: str = ""
+    official_source_url: str = ""
+    source_urls: list[str] = field(default_factory=list)
     description: str = ""
     sector: str = ""
     industry: str = ""
+    sub_industry: str = ""
+    business_scope: str = ""
     country: str = ""
+    country_code: str = ""
     price: str = ""
+    previous_close: str = ""
     market_cap: str = ""
+    updated_price_at: str = ""
     currency: str = ""
     ceo: str = ""
     employees: str = ""
     phone: str = ""
+    email: str = ""
     address: str = ""
+    legal_address: str = ""
+    registered_address: str = ""
     city: str = ""
     state: str = ""
+    postal_code: str = ""
     zip_code: str = ""
     image_url: str = ""
+    listing_date: str = ""
     ipo_date: str = ""
-    is_etf: str = ""
-    is_actively_trading: str = ""
-    is_adr: str = ""
-    is_fund: str = ""
+    is_etf: bool | None = None
+    is_actively_trading: bool | None = None
+    is_adr: bool | None = None
+    is_fund: bool | None = None
     provider_sources: list[str] = field(default_factory=list)
     field_sources: dict[str, str] = field(default_factory=dict)
+    field_candidates: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    data_coverage: dict[str, Any] = field(default_factory=dict)
+    missing_fields: list[str] = field(default_factory=list)
     updated_at: str = ""
     from_cache: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "display_name": self.display_name,
-            "symbol": self.symbol,
-            "exchange": self.exchange,
-            "market": self.market,
-            "lei": self.lei,
-            "wikidata_id": self.wikidata_id,
-            "wikipedia_url": self.wikipedia_url,
-            "website": self.website,
-            "description": self.description,
-            "sector": self.sector,
-            "industry": self.industry,
-            "country": self.country,
-            "price": self.price,
-            "market_cap": self.market_cap,
-            "currency": self.currency,
-            "ceo": self.ceo,
-            "employees": self.employees,
-            "phone": self.phone,
-            "address": self.address,
-            "city": self.city,
-            "state": self.state,
-            "zip_code": self.zip_code,
-            "image_url": self.image_url,
-            "ipo_date": self.ipo_date,
-            "is_etf": self.is_etf,
-            "is_actively_trading": self.is_actively_trading,
-            "is_adr": self.is_adr,
-            "is_fund": self.is_fund,
-            "provider_sources": self.provider_sources,
-            "field_sources": self.field_sources,
-            "updated_at": self.updated_at,
-            "from_cache": self.from_cache,
-            "raw": self.raw,
-        }
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CompanyProfile:
-        return cls(
-            display_name=str(data.get("display_name") or ""),
-            symbol=str(data.get("symbol") or ""),
-            exchange=str(data.get("exchange") or ""),
-            market=str(data.get("market") or ""),
-            lei=str(data.get("lei") or ""),
-            wikidata_id=str(data.get("wikidata_id") or ""),
-            wikipedia_url=str(data.get("wikipedia_url") or ""),
-            website=str(data.get("website") or ""),
-            description=str(data.get("description") or ""),
-            sector=str(data.get("sector") or ""),
-            industry=str(data.get("industry") or ""),
-            country=str(data.get("country") or ""),
-            price=str(data.get("price") or ""),
-            market_cap=str(data.get("market_cap") or ""),
-            currency=str(data.get("currency") or ""),
-            ceo=str(data.get("ceo") or ""),
-            employees=str(data.get("employees") or ""),
-            phone=str(data.get("phone") or ""),
-            address=str(data.get("address") or ""),
-            city=str(data.get("city") or ""),
-            state=str(data.get("state") or ""),
-            zip_code=str(data.get("zip_code") or ""),
-            image_url=str(data.get("image_url") or ""),
-            ipo_date=str(data.get("ipo_date") or ""),
-            is_etf=str(data.get("is_etf") or ""),
-            is_actively_trading=str(data.get("is_actively_trading") or ""),
-            is_adr=str(data.get("is_adr") or ""),
-            is_fund=str(data.get("is_fund") or ""),
-            provider_sources=[str(item) for item in data.get("provider_sources", []) if item],
-            field_sources={str(k): str(v) for k, v in dict(data.get("field_sources") or {}).items()},
-            updated_at=str(data.get("updated_at") or ""),
-            from_cache=bool(data.get("from_cache") or False),
-            raw=dict(data.get("raw") or {}),
-        )
+        values: dict[str, Any] = {}
+        list_fields = {"aliases", "source_urls", "provider_sources", "missing_fields"}
+        dict_fields = {"field_sources", "field_candidates", "data_coverage", "raw"}
+        bool_fields = {"is_listed", "is_etf", "is_fund", "is_adr", "is_actively_trading"}
+        for name in cls.__dataclass_fields__:
+            value = data.get(name)
+            if name == "schema_version":
+                values[name] = int(value or 1)
+            elif name in list_fields:
+                values[name] = list(value) if isinstance(value, (list, tuple)) else []
+            elif name in dict_fields:
+                values[name] = dict(value) if isinstance(value, dict) else {}
+            elif name in bool_fields:
+                if isinstance(value, bool):
+                    values[name] = value
+                elif isinstance(value, str) and value.strip().casefold() in {"true", "false"}:
+                    values[name] = value.strip().casefold() == "true"
+                else:
+                    values[name] = None
+            elif name == "from_cache":
+                values[name] = bool(value)
+            else:
+                values[name] = str(value or "")
+        if not values["postal_code"]:
+            values["postal_code"] = values["zip_code"]
+        if not values["zip_code"]:
+            values["zip_code"] = values["postal_code"]
+        return cls(**values)
+
+
+@dataclass
+class SearchTiming:
+    query: str
+    total_ms: float = 0.0
+    normalize_ms: float = 0.0
+    local_index_ms: float = 0.0
+    fuzzy_ms: float = 0.0
+    provider_ms: float = 0.0
+    dedup_ms: float = 0.0
+    ranking_ms: float = 0.0
+    render_ms: float = 0.0
+    provider_timings: dict[str, float] = field(default_factory=dict)
+    cache_hit: bool = False
+    cancelled: bool = False
+    result_count: int = 0
+    candidate_shortlist_size: int = 0
+    fuzzy_candidate_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "total_ms": round(self.total_ms, 3),
+            "normalize_ms": round(self.normalize_ms, 3),
+            "local_index_ms": round(self.local_index_ms, 3),
+            "fuzzy_ms": round(self.fuzzy_ms, 3),
+            "provider_ms": round(self.provider_ms, 3),
+            "dedup_ms": round(self.dedup_ms, 3),
+            "ranking_ms": round(self.ranking_ms, 3),
+            "render_ms": round(self.render_ms, 3),
+            "provider_timings": {
+                key: round(value, 3) for key, value in self.provider_timings.items()
+            },
+            "cache_hit": self.cache_hit,
+            "cancelled": self.cancelled,
+            "result_count": self.result_count,
+            "candidate_shortlist_size": self.candidate_shortlist_size,
+            "fuzzy_candidate_count": self.fuzzy_candidate_count,
+        }
 
 
 @dataclass
@@ -374,7 +430,8 @@ class SearchResponse:
     warnings: list[str] = field(default_factory=list)
     errors: list[ProviderError] = field(default_factory=list)
     from_cache: bool = False
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    timing: SearchTiming | None = None
 
 
 @dataclass

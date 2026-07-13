@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QThreadPool, QUrl
+from PySide6.QtCore import Qt, QThreadPool, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLayout,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -21,20 +22,20 @@ from PySide6.QtWidgets import (
 from cdm_desktop.paths import AppPaths
 from cdm_desktop.public_api import PublicSearchService, SearchResponse
 from cdm_desktop.public_api.models import CompanyResult, NewsItem, ProviderStatus
+from cdm_desktop.public_api.query import analyze_query
 from cdm_desktop.public_api.search_service import REGION_OPTIONS, region_label
 from cdm_desktop.public_api.watchlist_store import WatchlistStore
-from cdm_desktop.public_api.xueqiu_external_link import build_xueqiu_external_link
 from cdm_desktop.ui.components import (
     CollapsibleSection,
-    DetailGrid,
     EmptyState,
+    InlineError,
+    ListRow,
     LoadingState,
     PageHeader,
     SectionCard,
     StatusBadge,
     friendly_state_label,
     friendly_state_tone,
-    provider_status_summary,
     sanitize_error_message,
     scroll_container,
 )
@@ -47,6 +48,12 @@ SCOPES = [
     ("新闻", "news"),
     ("可能相关", "related"),
 ]
+
+DEBOUNCE_MS = 350
+MIN_TEXT_QUERY_LENGTH = 2
+MAX_SEARCH_WORKER_THREADS = 4
+
+logger = logging.getLogger(__name__)
 
 
 class SearchPage(QWidget):
@@ -70,7 +77,17 @@ class SearchPage(QWidget):
         self.current_region = "all"
         self.service = PublicSearchService(paths)
         self.watchlist = WatchlistStore(paths)
-        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(MAX_SEARCH_WORKER_THREADS)
+        self.search_request_id = 0
+        self._accepting_searches = True
+        self._active_cancel_event: threading.Event | None = None
+        self._visible_company_keys: set[str] = set()
+        self._background_status_label: QLabel | None = None
+        self.debounce_timer = QTimer(self)
+        self.debounce_timer.setSingleShot(True)
+        self.debounce_timer.setInterval(DEBOUNCE_MS)
+        self.debounce_timer.timeout.connect(self._run_debounced_search)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -80,27 +97,16 @@ class SearchPage(QWidget):
         self.layout.addWidget(
             PageHeader(
                 "搜索公司",
-                "先选择地区缩小数据源范围，再输入公司名称、股票代码、简称、缩写、LEI 或注册号。",
-                secondary_text="配置免费 API key",
-                secondary_action=lambda: self.navigate("/settings"),
+                "输入公司名称、股票代码或简称，本地结果会优先显示。",
             )
         )
         self.layout.addWidget(self._search_panel())
-
-        result_area = QWidget()
-        result_grid = QGridLayout(result_area)
-        result_grid.setContentsMargins(0, 0, 0, 0)
-        result_grid.setHorizontalSpacing(14)
-        result_grid.setVerticalSpacing(14)
         self.result_host = QVBoxLayout()
-        self.result_host.setSpacing(12)
+        self.result_host.setSpacing(8)
         self.side_host = QVBoxLayout()
-        self.side_host.setSpacing(12)
-        result_grid.addLayout(self.result_host, 0, 0)
-        result_grid.addLayout(self.side_host, 0, 1)
-        result_grid.setColumnStretch(0, 3)
-        result_grid.setColumnStretch(1, 1)
-        self.layout.addWidget(result_area)
+        self.side_host.setSpacing(8)
+        self.layout.addLayout(self.result_host)
+        self.layout.addLayout(self.side_host)
         self._show_initial_state()
         self.layout.addStretch()
 
@@ -109,46 +115,173 @@ class SearchPage(QWidget):
         self.input.setFocus()
 
     def run_search(self) -> None:
+        self.debounce_timer.stop()
+        self._start_search()
+
+    def _start_search(self) -> None:
+        if not self._accepting_searches:
+            return
         keyword = self.input.text().strip()
+        if self._active_cancel_event:
+            self._active_cancel_event.set()
+        self.thread_pool.clear()
+        cancel_event = threading.Event()
+        self._active_cancel_event = cancel_event
+        self.search_request_id += 1
+        request_id = self.search_request_id
         self._clear_results()
         if not keyword:
             self._show_initial_state()
             return
-        selected_count = self.service.selected_provider_count(
-            region_filter=self.current_region,
-            scope_filter=self.current_scope,
-        )
+        self.cancel_btn.setEnabled(True)
         self.result_host.addWidget(
             LoadingState(
-                f"正在按“{region_label(self.current_region)}”调用 {selected_count} 个匹配数据源。"
-                "未配置的增强来源会自动跳过。"
-            )
-        )
-        self.side_host.addWidget(
-            SectionCard(
-                "搜索状态",
-                "正在请求公开数据源和已配置的免费 API provider。局部失败会收进诊断，不会阻塞其他来源。",
+                f"正在按“{region_label(self.current_region)}”查询本地开源索引。"
+                "首批结果显示后再后台补充公开数据。"
             )
         )
         worker = FunctionWorker(
-            self.service.search,
+            self._run_local_search,
+            request_id,
             keyword,
-            20,
-            region_filter=self.current_region,
-            scope_filter=self.current_scope,
+            self.current_region,
+            self.current_scope,
+            cancel_event,
         )
-        worker.signals.finished.connect(self._render_response)
-        worker.signals.error.connect(self._render_error)
+        worker.signals.finished.connect(self._render_local_response)
+        worker.signals.error.connect(lambda message, rid=request_id: self._render_request_error(rid, message))
         self.thread_pool.start(worker)
 
-    def _search_panel(self) -> SectionCard:
-        card = SectionCard("联网搜索", "结果来自公开数据源和已配置的免费 API provider；不会展示伪造公司数据。")
+    def _on_query_changed(self, text: str) -> None:
+        if self._active_cancel_event:
+            self._active_cancel_event.set()
+        self.search_request_id += 1
+        self.debounce_timer.stop()
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        info = analyze_query(cleaned)
+        if len(cleaned) < MIN_TEXT_QUERY_LENGTH and info.kind == "name":
+            return
+        self.debounce_timer.start(0 if info.kind != "name" and len(cleaned) >= 2 else DEBOUNCE_MS)
+
+    def _run_debounced_search(self) -> None:
+        self._start_search()
+
+    def _cancel_search(self) -> None:
+        if self._active_cancel_event:
+            self._active_cancel_event.set()
+        self.search_request_id += 1
+        self.debounce_timer.stop()
+        self.cancel_btn.setEnabled(False)
+        if self._background_status_label:
+            self._background_status_label.setText("已取消当前搜索；后台返回的旧结果不会更新界面。")
+
+    def _run_local_search(
+        self,
+        request_id: int,
+        keyword: str,
+        region: str,
+        scope: str,
+        cancel_event: threading.Event,
+    ) -> tuple[int, SearchResponse]:
+        response = self.service.search_local(
+            keyword,
+            20,
+            region_filter=region,
+            scope_filter=scope,
+            cancel_check=cancel_event.is_set,
+        )
+        return request_id, response
+
+    def _run_background_enrichment(
+        self,
+        request_id: int,
+        keyword: str,
+        region: str,
+        scope: str,
+        local_response: SearchResponse,
+        cancel_event: threading.Event,
+    ) -> tuple[int, SearchResponse]:
+        response = self.service.enrich_search(
+            keyword,
+            local_response,
+            20,
+            region_filter=region,
+            scope_filter=scope,
+            cancel_check=cancel_event.is_set,
+        )
+        return request_id, response
+
+    def _render_local_response(self, payload: object) -> None:
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            self._render_error("本地搜索返回了未知结果。")
+            return
+        request_id, result = payload
+        if request_id != self.search_request_id or not isinstance(result, SearchResponse):
+            if isinstance(result, SearchResponse) and result.timing:
+                result.timing.cancelled = True
+            return
+        if result.timing and result.timing.cancelled:
+            return
+        self._render_response(result)
+        self._visible_company_keys = {company.dedupe_key() for company in result.companies}
+        self._background_status_label = QLabel("已显示本地开源索引结果，正在后台补充公开数据。")
+        self._background_status_label.setObjectName("MutedText")
+        self._background_status_label.setWordWrap(True)
+        self.side_host.addWidget(self._background_status_label)
+        worker = FunctionWorker(
+            self._run_background_enrichment,
+            request_id,
+            result.query,
+            self.current_region,
+            self.current_scope,
+            result,
+            self._active_cancel_event or threading.Event(),
+        )
+        worker.signals.finished.connect(self._render_enrichment_response)
+        worker.signals.error.connect(lambda message, rid=request_id: self._render_enrichment_error(rid, message))
+        self.thread_pool.start(worker)
+
+    def _render_enrichment_response(self, payload: object) -> None:
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            return
+        request_id, result = payload
+        if request_id != self.search_request_id or not isinstance(result, SearchResponse):
+            if isinstance(result, SearchResponse) and result.timing:
+                result.timing.cancelled = True
+            return
+        if result.timing and result.timing.cancelled:
+            return
+        new_rows = [company for company in result.companies if company.dedupe_key() not in self._visible_company_keys]
+        if new_rows:
+            for company in new_rows:
+                self._visible_company_keys.add(company.dedupe_key())
+            self.result_host.addWidget(self._company_group("公开数据补充", new_rows))
+        if self._background_status_label:
+            self._background_status_label.setText("已完成公开数据补充。")
+        self.cancel_btn.setEnabled(False)
+        self.side_host.addWidget(self._diagnostics(result.statuses))
+
+    def _render_request_error(self, request_id: int, message: str) -> None:
+        if request_id == self.search_request_id:
+            self._render_error(message)
+
+    def _render_enrichment_error(self, request_id: int, _message: str) -> None:
+        if request_id == self.search_request_id and self._background_status_label:
+            self._background_status_label.setText("部分公开数据源暂时不可用，已保留本地结果。")
+
+    def _search_panel(self) -> QWidget:
+        card = QWidget()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(10)
 
         region_row = QHBoxLayout()
-        region_label_widget = QLabel("地区 / 国家")
+        region_label_widget = QLabel("地区")
         region_label_widget.setObjectName("MutedText")
         self.region_filter = QComboBox()
-        self.region_filter.setMinimumWidth(260)
+        self.region_filter.setMinimumWidth(220)
         for value, label, description in REGION_OPTIONS:
             self.region_filter.addItem(label, value)
             self.region_filter.setItemData(self.region_filter.count() - 1, description, Qt.ItemDataRole.ToolTipRole)
@@ -159,32 +292,27 @@ class SearchPage(QWidget):
         region_row.addWidget(region_label_widget)
         region_row.addWidget(self.region_filter)
         region_row.addWidget(self.region_hint, 1)
-        card.layout.addLayout(region_row)
+        card_layout.addLayout(region_row)
 
         search_row = QHBoxLayout()
-        keyword_label = QLabel("关键词")
-        keyword_label.setObjectName("MutedText")
         self.input = QLineEdit()
         self.input.setObjectName("HeroSearchInput")
-        self.input.setPlaceholderText("搜索公司、股票代码、简称或缩写，例如 Apple、AAPL、腾讯、IBM")
+        self.input.setPlaceholderText("搜索公司、股票代码或简称")
+        self.input.setClearButtonEnabled(True)
         self.input.returnPressed.connect(self.run_search)
+        self.input.textChanged.connect(self._on_query_changed)
         search_btn = QPushButton("搜索")
         search_btn.setObjectName("PrimaryButton")
         search_btn.clicked.connect(self.run_search)
-        search_row.addWidget(keyword_label)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._cancel_search)
         search_row.addWidget(self.input, 1)
         search_row.addWidget(search_btn)
-        card.layout.addLayout(search_row)
-
-        hint = QLabel("支持公司全称、股票代码、简称、缩写、LEI、注册号。匹配不确定时会归入“可能相关”。")
-        hint.setObjectName("MutedText")
-        hint.setWordWrap(True)
-        card.layout.addWidget(hint)
+        search_row.addWidget(self.cancel_btn)
+        card_layout.addLayout(search_row)
 
         scope_row = QHBoxLayout()
-        scope_label = QLabel("结果类型")
-        scope_label.setObjectName("MutedText")
-        scope_row.addWidget(scope_label)
         self.scope_group = QButtonGroup(self)
         self.scope_group.setExclusive(True)
         for label, value in SCOPES:
@@ -192,27 +320,41 @@ class SearchPage(QWidget):
             button.setCheckable(True)
             button.setObjectName("ScopeChip")
             button.setProperty("scope", value)
+            if value == "news":
+                button.setEnabled(False)
+                button.setToolTip("新闻在公司详情页按需加载，不参与普通公司搜索。")
             if value == "all":
                 button.setChecked(True)
             button.clicked.connect(self._scope_changed)
             self.scope_group.addButton(button)
             scope_row.addWidget(button)
         scope_row.addStretch()
-        card.layout.addLayout(scope_row)
+        card_layout.addLayout(scope_row)
         return card
 
     def _scope_changed(self) -> None:
         button = self.sender()
         if isinstance(button, QPushButton):
+            if self._active_cancel_event:
+                self._active_cancel_event.set()
             self.current_scope = str(button.property("scope"))
+            self.search_request_id += 1
+            if self.input.text().strip():
+                self.debounce_timer.start(DEBOUNCE_MS)
 
     def _region_changed(self) -> None:
+        if self._active_cancel_event:
+            self._active_cancel_event.set()
         self.current_region = str(self.region_filter.currentData() or "all")
+        self.search_request_id += 1
         self.region_hint.setText(
             str(self.region_filter.itemData(self.region_filter.currentIndex(), Qt.ItemDataRole.ToolTipRole) or "")
         )
+        if self.input.text().strip():
+            self.debounce_timer.start(DEBOUNCE_MS)
 
     def _render_response(self, result: object) -> None:
+        render_started = time.perf_counter()
         self._clear_results()
         if not isinstance(result, SearchResponse):
             self._render_error("搜索服务返回了未知结果。")
@@ -226,29 +368,22 @@ class SearchPage(QWidget):
             for title, rows in groups:
                 if rows:
                     self.result_host.addWidget(self._company_group(title, rows))
-            if result.news and self.current_scope in {"all", "news"}:
-                self.result_host.addWidget(self._news_group(result.news[:8]))
         self.side_host.addWidget(self._diagnostics(result.statuses))
-        self.side_host.addStretch()
+        if result.timing:
+            result.timing.render_ms = (time.perf_counter() - render_started) * 1000
+            logger.debug("search_render_timing payload=%s", result.timing.to_dict())
 
     def _render_light_status(self, statuses: list[ProviderStatus], from_cache: bool) -> None:
-        summary = provider_status_summary(statuses)
-        missing = sum(1 for item in statuses if item.state == "not_configured")
-        failed = sum(1 for item in statuses if item.state in {"failed", "invalid_key", "rate_limited"})
-        card = SectionCard("覆盖状态")
-        row = QGridLayout()
-        status_items = [("上市公司", "financial"), ("法人实体", "registry"), ("公开补充", "global"), ("新闻", "news")]
-        for index, (label, category) in enumerate(status_items):
-            state = summary.get(category, "部分可用")
-            tone = "success" if state == "正常" else "warning" if state in {"部分可用", "未配置"} else "danger"
-            row.addWidget(StatusBadge(f"{label}：{state}", tone), index // 2, index % 2)
-        card.layout.addLayout(row)
-        if missing:
-            card.layout.addWidget(StatusBadge("部分增强数据源未配置免费 API key，覆盖可能受限。", "warning"))
-        if failed:
-            card.layout.addWidget(StatusBadge("部分数据源暂时不可用，已继续尝试其他来源。", "warning"))
+        failed = sum(1 for item in statuses if item.state in {"failed", "invalid_key", "rate_limited", "network_timeout"})
+        card = QWidget()
+        row = QHBoxLayout(card)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(StatusBadge("本地结果", "success"))
         if from_cache:
-            card.layout.addWidget(StatusBadge("当前展示了本地缓存结果。", "info"))
+            row.addWidget(StatusBadge("来自缓存", "info"))
+        if failed:
+            row.addWidget(StatusBadge("部分公开来源暂时不可用", "warning"))
+        row.addStretch()
         self.side_host.addWidget(card)
 
     def _company_group(self, title: str, companies: list[CompanyResult]) -> SectionCard:
@@ -257,76 +392,28 @@ class SearchPage(QWidget):
             card.layout.addWidget(self._company_card(company))
         return card
 
-    def _company_card(self, company: CompanyResult) -> SectionCard:
+    def _company_card(self, company: CompanyResult) -> QWidget:
         identity = company.symbol or company.lei or company.company_number or company.registry_number or "暂无标识"
         region = company.exchange or company.market or company.jurisdiction or company.country or "暂无地区"
-        card = SectionCard()
-        card.setObjectName("SearchResultCard")
-        top = QHBoxLayout()
-        title_box = QVBoxLayout()
-        name = QLabel(company.name or identity)
-        name.setObjectName("SectionTitle")
-        meta = QLabel(f"{identity} · {region}")
-        meta.setObjectName("MutedText")
-        meta.setWordWrap(True)
-        title_box.addWidget(name)
-        title_box.addWidget(meta)
-        top.addLayout(title_box, 1)
-        top.addWidget(StatusBadge(company.provider, "info"))
-        if company.match_score:
-            tone = "success" if company.match_score >= 85 else "warning"
-            top.addWidget(StatusBadge(f"匹配 {company.match_score}", tone))
-        card.layout.addLayout(top)
-        reason = QLabel(company.match_reason or "公开来源返回")
-        reason.setObjectName("MutedText")
-        reason.setWordWrap(True)
-        card.layout.addWidget(reason)
-        row = QHBoxLayout()
-        detail_btn = QPushButton("查看详情")
-        detail_btn.clicked.connect(lambda _checked=False, c=company: self._open_detail(c))
-        add_btn = QPushButton("添加自选")
-        add_btn.setObjectName("PrimaryButton")
-        add_btn.clicked.connect(lambda _checked=False, c=company: self._add_watchlist(c))
-        row.addWidget(detail_btn)
-        row.addWidget(add_btn)
-        if company.source_url:
-            source_btn = QPushButton("打开来源")
-            source_btn.clicked.connect(lambda _checked=False, url=company.source_url: QDesktopServices.openUrl(QUrl(url)))
-            row.addWidget(source_btn)
-        row.addStretch()
-        card.layout.addLayout(row)
+        source = "本地索引" if company.provider_id == "symbol_universe" or company.raw.get("from_local_index") else "公开来源"
+        row = ListRow(
+            company.name or company.display_name or company.legal_name or identity,
+            f"{identity} · {region}",
+            detail=company.description or self._company_kind(company),
+            source=source,
+            action_tooltip="添加自选",
+            action=lambda c=company: self._add_watchlist(c),
+        )
+        row.activated.connect(lambda c=company: self._open_detail(c))
+        return row
 
-        advanced = CollapsibleSection("更多字段", expanded=False)
-        advanced.body_layout.addWidget(
-            DetailGrid(
-                [
-                    ("Legal name", company.legal_name),
-                    ("LEI", company.lei),
-                    ("注册号", company.company_number or company.registry_number),
-                    ("交易所 / 市场", company.exchange or company.market),
-                    ("官网", company.website),
-                    ("更新时间", company.updated_at),
-                ],
-                columns=2,
-            )
-        )
-        xueqiu_link = build_xueqiu_external_link(
-            symbol=company.symbol,
-            exchange=company.exchange,
-            market=company.market,
-            company_name=company.name or company.display_name or company.legal_name,
-        )
-        if xueqiu_link.is_direct_stock_link:
-            external_row = QHBoxLayout()
-            external_row.addWidget(StatusBadge("外部链接", "info"))
-            external_row.addWidget(StatusBadge("不抓取内容", "warning"))
-            open_xueqiu = QPushButton("打开雪球")
-            open_xueqiu.clicked.connect(lambda _checked=False, url=xueqiu_link.url: QDesktopServices.openUrl(QUrl(url)))
-            external_row.addWidget(open_xueqiu)
-            external_row.addStretch()
-            advanced.body_layout.addLayout(external_row)
-        card.layout.addWidget(advanced)
-        return card
+    @staticmethod
+    def _company_kind(company: CompanyResult) -> str:
+        if company.symbol:
+            return "上市公司"
+        if company.lei or company.company_number or company.registry_number:
+            return "法人实体"
+        return "公开公司资料"
 
     def _news_group(self, news_items: list[NewsItem]) -> SectionCard:
         card = SectionCard("相关新闻", "只展示标题、来源、时间和链接，不复制新闻全文。")
@@ -358,19 +445,26 @@ class SearchPage(QWidget):
         return diagnostics
 
     def _group_companies(self, companies: list[CompanyResult]) -> list[tuple[str, list[CompanyResult]]]:
-        best = [item for item in companies if item.match_score >= 85][:5]
+        best = [item for item in companies if item.match_score >= 85][:3]
+        best_keys = {item.dedupe_key() for item in best}
         financial = [
             item
             for item in companies
-            if item.category == "financial" or item.provider_id in {"fmp", "alpha_vantage", "nasdaq_directory"}
+            if item.dedupe_key() not in best_keys
+            and (item.category == "financial" or item.provider_id in {"fmp", "alpha_vantage", "nasdaq_directory"})
         ]
+        financial_keys = {item.dedupe_key() for item in financial}
         entity = [
             item
             for item in companies
-            if item.category in {"global", "registry"}
-            or item.provider_id in {"gleif", "opencorporates", "companies_house", "norway_brreg"}
+            if item.dedupe_key() not in best_keys | financial_keys
+            and (
+                item.category in {"global", "registry"}
+                or item.provider_id in {"gleif", "opencorporates", "companies_house", "norway_brreg"}
+            )
         ]
-        related = [item for item in companies if item.match_score < 85]
+        shown_keys = best_keys | financial_keys | {item.dedupe_key() for item in entity}
+        related = [item for item in companies if item.dedupe_key() not in shown_keys and item.match_score < 85]
         return [
             ("最佳匹配", best),
             ("上市公司", financial),
@@ -403,8 +497,8 @@ class SearchPage(QWidget):
     def _empty_result_card(self) -> EmptyState:
         return EmptyState(
             "未找到高置信度匹配",
-            "请尝试使用公司全称、股票代码、英文名、注册号或 LEI；也可以在设置页配置免费 API key 提升覆盖范围。",
-            action_text="配置免费 API key",
+            "请尝试使用公司全称、股票代码、英文名、中文简称、注册号或 LEI；高级用户可在设置页启用 API provider 扩展覆盖。",
+            action_text="数据源设置",
             action=lambda: self.navigate("/settings"),
         )
 
@@ -412,7 +506,9 @@ class SearchPage(QWidget):
         self.watchlist.add(company)
         if self.on_watchlist_changed:
             self.on_watchlist_changed()
-        QMessageBox.information(self, "自选公司", "已添加到本机自选公司。")
+        window = self.window()
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage("已添加到自选公司", 3000)
 
     def _open_detail(self, company: CompanyResult) -> None:
         if self.on_company_selected:
@@ -421,35 +517,17 @@ class SearchPage(QWidget):
             self.navigate("/company/placeholder")
 
     def _render_error(self, message: str) -> None:
+        self.cancel_btn.setEnabled(False)
         self._clear_results()
-        self.result_host.addWidget(
-            EmptyState(
-                "搜索失败",
-                sanitize_error_message(message),
-                action_text="重试",
-                action=self.run_search,
-            )
-        )
-        self.side_host.addWidget(
-            SectionCard("数据源诊断", "所有可用来源都未能返回结果。请检查网络、免费 API key 或稍后重试。")
-        )
+        self.result_host.addWidget(InlineError(message, retry=self.run_search))
 
     def _show_initial_state(self) -> None:
         self.result_host.addWidget(
             EmptyState(
-                "开始搜索公司",
-                "输入公司名、股票代码、简称、缩写、LEI 或注册号后开始查询。未配置的增强数据源会自动跳过。",
-                action_text="配置免费 API key",
-                action=lambda: self.navigate("/settings"),
+                "搜索公司名称、股票代码或简称",
+                "本地开源索引会优先返回结果，公开数据随后在后台补充。",
             )
         )
-        self.side_host.addWidget(
-            SectionCard(
-                "结果预览",
-                "搜索后左侧显示公司和新闻列表，右侧显示数据源覆盖、缓存和诊断状态。",
-            )
-        )
-        self.side_host.addStretch()
 
     def _clear_results(self) -> None:
         self._clear_layout(self.result_host)
@@ -461,6 +539,16 @@ class SearchPage(QWidget):
             widget = item.widget()
             child_layout = item.layout()
             if widget:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
             elif child_layout:
                 self._clear_layout(child_layout)
+
+    def shutdown(self, wait_ms: int = 250) -> bool:
+        self._accepting_searches = False
+        self.debounce_timer.stop()
+        if self._active_cancel_event:
+            self._active_cancel_event.set()
+        self.thread_pool.clear()
+        return self.thread_pool.waitForDone(wait_ms)

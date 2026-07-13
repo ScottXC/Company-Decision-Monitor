@@ -7,12 +7,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from clean_build import clean
-from package_portable import PortablePackageResult, create_portable_zip
+try:
+    from clean_build import clean
+    from package_portable import PortablePackageResult, create_portable_zip
+except ModuleNotFoundError:
+    from scripts.clean_build import clean
+    from scripts.package_portable import PortablePackageResult, create_portable_zip
 
 APP_NAME = "CompanyDecisionMonitor"
 EXE_NAME = "CompanyDecisionMonitor.exe"
-VERSION_NAME = "v0.1.2"
+VERSION_NAME = "v0.1.3"
+SYMBOL_UNIVERSE_INDEX = Path("src") / "cdm_desktop" / "resources" / "symbol_universe" / "symbol_universe.sqlite"
 
 
 @dataclass(frozen=True)
@@ -21,6 +26,13 @@ class Artifact:
     path: Path
     exists: bool
     size_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class SqliteRuntimeFiles:
+    sqlite_extension_path: Path
+    sqlite_dll_path: Path
+    checked_paths: tuple[Path, ...]
 
 
 def find_iscc() -> tuple[str | None, list[str]]:
@@ -43,6 +55,66 @@ def find_iscc() -> tuple[str | None, list[str]]:
     return None, checked
 
 
+def find_sqlite_runtime_files(
+    *,
+    candidate_roots: list[Path] | None = None,
+    sqlite_extension_path: Path | None = None,
+) -> SqliteRuntimeFiles:
+    if sqlite_extension_path is None:
+        try:
+            import _sqlite3
+            import sqlite3  # noqa: F401
+        except Exception as exc:
+            raise RuntimeError(f"Cannot import sqlite3/_sqlite3 in build Python: {exc}") from exc
+        sqlite_extension_path = Path(_sqlite3.__file__).resolve()
+    else:
+        sqlite_extension_path = sqlite_extension_path.resolve()
+
+    if not sqlite_extension_path.exists():
+        raise FileNotFoundError(f"_sqlite3 extension was not found: {sqlite_extension_path}")
+
+    roots: list[Path] = []
+    if candidate_roots is None:
+        for value in (sys.prefix, sys.base_prefix, os.environ.get("CONDA_PREFIX")):
+            if value:
+                path = Path(value).resolve()
+                if path not in roots:
+                    roots.append(path)
+    else:
+        for root in candidate_roots:
+            path = root.resolve()
+            if path not in roots:
+                roots.append(path)
+
+    candidates: list[Path] = []
+    for root in roots:
+        candidates.extend(
+            [
+                root / "DLLs" / "sqlite3.dll",
+                root / "Library" / "bin" / "sqlite3.dll",
+            ]
+        )
+    candidates.append(sqlite_extension_path.parent / "sqlite3.dll")
+
+    checked: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in checked:
+            continue
+        checked.append(resolved)
+        if resolved.exists():
+            return SqliteRuntimeFiles(
+                sqlite_extension_path=sqlite_extension_path,
+                sqlite_dll_path=resolved,
+                checked_paths=tuple(checked),
+            )
+
+    checked_text = "\n".join(f"- {path}" for path in checked)
+    raise FileNotFoundError(
+        "sqlite3.dll was not found for the current Python runtime. Checked paths:\n" + checked_text
+    )
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     dist_app_dir = root / "dist" / APP_NAME
@@ -54,14 +126,19 @@ def main() -> int:
     try:
         _phase("清理旧构建")
         clean(root, full=True)
+        (root / "build").mkdir(parents=True, exist_ok=True)
 
         _phase("代码检查")
         _run([_tool("ruff"), "check", "src", "tests", "scripts"], root)
-        _run([_tool("pytest")], root)
+        _run([_tool("pytest"), "--basetemp=build/pytest-temp"], root)
+
+        _phase("内置开源证券索引检查")
+        _ensure_symbol_universe_index(root)
 
         _phase("PyInstaller 构建")
         _run(_pyinstaller_command(root), root)
         _verify_pyinstaller_output(dist_app_dir, exe_path)
+        _run_frozen_sqlite_self_test(exe_path, root)
         print(f"EXE: {exe_path}")
 
         _phase("便携版 zip 生成")
@@ -129,6 +206,13 @@ def _run(command: list[str], cwd: Path) -> None:
 
 def _pyinstaller_command(root: Path) -> list[str]:
     icon_path = root / "src" / "cdm_desktop" / "resources" / "app.ico"
+    sqlite_runtime = find_sqlite_runtime_files()
+    print(f"SQLite extension: {sqlite_runtime.sqlite_extension_path}")
+    print(f"SQLite runtime DLL: {sqlite_runtime.sqlite_dll_path}")
+    print("SQLite DLL checked paths:")
+    for checked_path in sqlite_runtime.checked_paths:
+        print(f"- {checked_path}")
+
     command = [
         sys.executable,
         "-m",
@@ -139,9 +223,13 @@ def _pyinstaller_command(root: Path) -> list[str]:
         "--onedir",
         "--name",
         APP_NAME,
+        "--additional-hooks-dir",
+        str(root / "pyinstaller_hooks"),
     ]
     if icon_path.exists():
         command.extend(["--icon", str(icon_path)])
+    for module in ["sqlite3", "_sqlite3"]:
+        command.extend(["--hidden-import", module])
     for module in [
         "pandas",
         "numpy",
@@ -152,6 +240,11 @@ def _pyinstaller_command(root: Path) -> list[str]:
         "transformers",
         "tensorflow",
         "pyarrow",
+        "financedatabase",
+        "financetoolkit",
+        "yfinance",
+        "curl_cffi",
+        "akshare",
         "redis",
         "psycopg",
         "psycopg2",
@@ -167,18 +260,46 @@ def _pyinstaller_command(root: Path) -> list[str]:
         "pip_audit",
     ]:
         command.extend(["--exclude-module", module])
-    for dll in _python_runtime_dlls():
+    binaries = [
+        sqlite_runtime.sqlite_dll_path,
+        sqlite_runtime.sqlite_extension_path,
+        *_python_runtime_dlls(),
+    ]
+    added_binaries: set[Path] = set()
+    for dll in binaries:
+        resolved = dll.resolve()
+        if resolved in added_binaries:
+            continue
+        added_binaries.add(resolved)
         command.extend(["--add-binary", f"{dll};."])
     command.extend(
         [
             "--add-data",
             str(root / "src" / "cdm_desktop" / "resources") + ";cdm_desktop/resources",
             "--add-data",
-            str(root / "src" / "cdm_desktop" / "ui" / "styles.qss") + ";cdm_desktop/ui",
+            str(root / "src" / "cdm_desktop" / "ui" / "theme" / "light.qss") + ";cdm_desktop/ui/theme",
+            "--add-data",
+            str(root / "src" / "cdm_desktop" / "ui" / "theme" / "dark.qss") + ";cdm_desktop/ui/theme",
+            "--add-data",
+            str(root / "THIRD_PARTY_NOTICES.md") + ";.",
+            "--add-data",
+            str(root / "third_party" / "licenses") + ";third_party/licenses",
             str(root / "src" / "cdm_desktop" / "main.py"),
         ]
     )
     return command
+
+
+def _ensure_symbol_universe_index(root: Path) -> None:
+    index_path = root / SYMBOL_UNIVERSE_INDEX
+    if not index_path.exists():
+        print("Symbol universe index missing; generating from FinanceDatabase.")
+        _run([sys.executable, "scripts/build_symbol_universe.py"], root)
+    if not index_path.exists():
+        raise FileNotFoundError(f"Symbol universe index was not generated: {index_path}")
+    size_mb = index_path.stat().st_size / 1024 / 1024
+    print(f"Symbol universe index: {index_path}")
+    print(f"Symbol universe index size: {size_mb:.2f} MB")
 
 
 def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
@@ -192,7 +313,15 @@ def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
     required_files = [
         dist_app_dir / "_internal" / "cdm_desktop" / "resources" / "app.ico",
         dist_app_dir / "_internal" / "cdm_desktop" / "resources" / "app.png",
-        dist_app_dir / "_internal" / "cdm_desktop" / "ui" / "styles.qss",
+        dist_app_dir / "_internal" / "cdm_desktop" / "resources" / "symbol_universe" / "symbol_universe.sqlite",
+        dist_app_dir / "_internal" / "cdm_desktop" / "ui" / "theme" / "light.qss",
+        dist_app_dir / "_internal" / "cdm_desktop" / "ui" / "theme" / "dark.qss",
+        dist_app_dir / "_internal" / "THIRD_PARTY_NOTICES.md",
+        dist_app_dir / "_internal" / "third_party" / "licenses" / "RapidFuzz_LICENSE.txt",
+        dist_app_dir / "_internal" / "third_party" / "licenses" / "cleanco_LICENSE.txt",
+        dist_app_dir / "_internal" / "third_party" / "licenses" / "FinanceDatabase_LICENSE.txt",
+        dist_app_dir / "_internal" / "sqlite3.dll",
+        dist_app_dir / "_internal" / "_sqlite3.pyd",
     ]
     missing = [path for path in required_files if not path.exists()]
     if missing:
@@ -214,6 +343,13 @@ def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
     print(f"PyInstaller files: {file_count}")
     print("Config files: user API keys are stored only in AppData and are not packaged")
     print("Old product data check: no source/test directories are included in dist output")
+
+
+def _run_frozen_sqlite_self_test(exe_path: Path, root: Path) -> None:
+    if not exe_path.exists():
+        raise FileNotFoundError(f"Cannot run SQLite self-test because executable is missing: {exe_path}")
+    print("Running frozen SQLite self-test")
+    _run([str(exe_path), "--self-test", "sqlite"], root)
 
 
 def _build_installer(

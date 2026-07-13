@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 DIST_APP_DIR = Path("dist") / "CompanyDecisionMonitor"
 EXE_NAME = "CompanyDecisionMonitor.exe"
 ZIP_PATH = Path("dist") / "CompanyDecisionMonitor_Portable.zip"
+TEMP_ZIP_NAME = "CompanyDecisionMonitor_Portable.zip.tmp"
 ZIP_ROOT = "CompanyDecisionMonitor"
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".git", "node_modules"}
 EXCLUDED_SUFFIXES = {".log", ".tmp", ".temp", ".bak"}
@@ -31,18 +33,19 @@ def create_portable_zip(root: Path | None = None) -> PortablePackageResult:
             f"{exe_path} does not exist. Run the PyInstaller build before creating the portable zip."
         )
 
-    if zip_path.exists():
-        zip_path.unlink()
     zip_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_zip_path = zip_path.with_name(TEMP_ZIP_NAME)
+    _unlink_with_retry(temp_zip_path)
 
     file_count = 0
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in sorted(dist_app_dir.rglob("*")):
             if not path.is_file() or _should_exclude(path):
                 continue
             relative = path.relative_to(dist_app_dir)
             archive.write(path, Path(ZIP_ROOT) / relative)
             file_count += 1
+    _replace_with_retry(temp_zip_path, zip_path)
 
     return PortablePackageResult(
         path=zip_path,
@@ -59,6 +62,34 @@ def _should_exclude(path: Path) -> bool:
         return True
     name = path.name.lower()
     return name.endswith((".old", ".orig")) or "setup" in name and path.suffix.lower() == ".exe"
+
+
+def _unlink_with_retry(path: Path, *, attempts: int = 8, delay_seconds: float = 0.5) -> None:
+    if not path.exists():
+        return
+    last_error: OSError | None = None
+    for _attempt in range(attempts):
+        try:
+            path.unlink()
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(delay_seconds)
+    raise RuntimeError(f"Cannot remove existing package file because it is still in use: {path}") from last_error
+
+
+def _replace_with_retry(source: Path, target: Path, *, attempts: int = 8, delay_seconds: float = 0.5) -> None:
+    last_error: OSError | None = None
+    for _attempt in range(attempts):
+        try:
+            if target.exists():
+                target.unlink()
+            source.replace(target)
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(delay_seconds)
+    raise RuntimeError(f"Cannot replace portable package because the target is still in use: {target}") from last_error
 
 
 def _format_size(size_bytes: int) -> str:

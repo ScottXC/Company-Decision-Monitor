@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from cdm_desktop.public_api.models import ExternalSourceLink
+from cdm_desktop.public_api.provider_health import utc_timestamp
 
 XUEQIU_HOME_URL = "https://xueqiu.com/"
 XUEQIU_STOCK_BASE_URL = "https://xueqiu.com/S/"
@@ -121,4 +120,4 @@ def _market_label(symbol: str) -> str:
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return utc_timestamp()

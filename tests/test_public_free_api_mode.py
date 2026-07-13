@@ -36,6 +36,7 @@ from cdm_desktop.public_api.query import (
 )
 from cdm_desktop.public_api.registry import ProviderRegistry
 from cdm_desktop.public_api.search_service import PublicSearchService
+from cdm_desktop.public_api.settings_store import PublicApiSettingsStore
 from cdm_desktop.public_api.watchlist_store import WatchlistStore
 
 
@@ -82,8 +83,8 @@ def test_provider_not_configured_status(tmp_path: Path) -> None:
     statuses = service.provider_statuses()
     fmp = next(item for item in statuses if item.provider_id == "fmp")
 
-    assert fmp.state == "not_configured"
-    assert "FMP_API_KEY" in fmp.message
+    assert fmp.state == "disabled"
+    assert "普通用户无需配置" in fmp.message
 
 
 def test_region_prefilter_selects_relevant_provider_subset(tmp_path: Path) -> None:
@@ -94,13 +95,13 @@ def test_region_prefilter_selects_relevant_provider_subset(tmp_path: Path) -> No
     no_entity = service.selected_provider_ids(region_filter="no", scope_filter="entity")
     global_financial = service.selected_provider_ids(region_filter="global", scope_filter="financial")
 
-    assert us_financial[:3] == ["fmp", "alpha_vantage", "nasdaq_directory"]
+    assert us_financial[:3] == ["symbol_universe", "nasdaq_directory"]
     assert "companies_house" not in us_financial
-    assert uk_entity[:4] == ["companies_house", "opencorporates", "wikidata", "gleif"]
-    assert no_entity[:4] == ["norway_brreg", "wikidata", "gleif", "opencorporates"]
+    assert uk_entity[:2] == ["wikidata", "gleif"]
+    assert no_entity[:3] == ["norway_brreg", "wikidata", "gleif"]
     assert "nasdaq_directory" not in uk_entity
-    assert "fmp" in global_financial
-    assert "opencorporates" not in global_financial
+    assert "symbol_universe" in global_financial
+    assert "fmp" not in global_financial
     assert "wikidata" not in us_financial
     assert "wikidata" in uk_entity
 
@@ -393,6 +394,7 @@ def test_company_search_service_aggregates_and_dedupes(tmp_path: Path, monkeypat
     ApiKeyStore(paths).set("FMP_API_KEY", "fmp-key")
     ApiKeyStore(paths).set("ALPHA_VANTAGE_API_KEY", "alpha-key")
     ApiKeyStore(paths).set("MARKETAUX_API_KEY", "marketaux-key")
+    PublicApiSettingsStore(paths).set_advanced_api_providers_enabled(True)
 
     class FakeProvider:
         def __init__(self, provider_id: str) -> None:
@@ -410,7 +412,8 @@ def test_company_search_service_aggregates_and_dedupes(tmp_path: Path, monkeypat
 
     assert len(response.companies) == 1
     assert response.companies[0].provider_id == "fmp"
-    assert response.news[0].provider_id == "marketaux"
+    # Company search never loads news; news is detail-on-demand.
+    assert response.news == []
     assert response.grouped_results["best_matches"]
 
 

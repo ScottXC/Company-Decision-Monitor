@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+import re
+import unicodedata
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +29,7 @@ def cache_key(provider: str, endpoint: str, params: dict[str, Any], query: str =
         "provider": provider,
         "endpoint": endpoint,
         "params": sanitize_params(params),
-        "query": query.strip().lower(),
+        "query": _normalize_key_text(query),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -45,7 +47,7 @@ class ApiCache:
         if payload is None:
             return None
         expires_at = payload["expires_at"]
-        if expires_at < datetime.utcnow():
+        if expires_at < _now():
             return None
         return payload["data"]
 
@@ -61,13 +63,13 @@ class ApiCache:
             return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            expires_at = datetime.fromisoformat(str(payload["expires_at"]))
+            expires_at = _parse_datetime(str(payload["expires_at"]))
         except (OSError, KeyError, ValueError, json.JSONDecodeError):
             return None
         return {"expires_at": expires_at, "data": payload.get("data")}
 
     def set(self, key: str, data: Any, ttl_seconds: int | None = None) -> None:
-        expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds or self.ttl_seconds)
+        expires_at = _now() + timedelta(seconds=ttl_seconds or self.ttl_seconds)
         payload = {"expires_at": expires_at.isoformat(), "data": data}
         self._path(key).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -86,3 +88,19 @@ class ApiCache:
 
     def _path(self, key: str) -> Path:
         return self.cache_dir / f"{key}.json"
+
+
+def _normalize_key_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "").strip().casefold()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _parse_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed

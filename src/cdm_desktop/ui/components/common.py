@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -12,8 +13,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +40,9 @@ STATE_LABELS = {
     "parse_error": "解析失败",
     "provider_unavailable": "来源不可用",
     "cache_miss": "无缓存",
+    "dependency_missing": "依赖未安装",
+    "index_missing": "索引缺失",
+    "index_corrupted": "索引损坏",
 }
 
 STATE_TONES = {
@@ -55,6 +61,9 @@ STATE_TONES = {
     "parse_error": "danger",
     "provider_unavailable": "danger",
     "cache_miss": "neutral",
+    "dependency_missing": "warning",
+    "index_missing": "danger",
+    "index_corrupted": "danger",
 }
 
 CATEGORY_LABELS = {
@@ -64,6 +73,9 @@ CATEGORY_LABELS = {
     "news": "新闻媒体",
     "fallback": "补充来源",
     "external_link": "外部链接",
+    "symbol_universe": "证券目录",
+    "experimental": "实验来源",
+    "web_evidence": "网页证据",
 }
 
 
@@ -71,8 +83,8 @@ def show_preview_message(parent: QWidget, title: str = "当前模式") -> None:
     QMessageBox.information(
         parent,
         title,
-        "当前版本为 Public + Free API Network Mode。\n"
-        "软件会优先使用公开数据源；部分增强来源需要用户自行配置免费 API key。"
+        f"当前版本为 {APP_MODE_LABEL}。\n"
+        "普通用户默认无需申请 API key；软件会优先使用开源项目组合和公开无 key 数据源。"
         "未配置的来源会自动跳过，不会显示伪造公司、新闻或财务数据。",
     )
 
@@ -126,8 +138,8 @@ class SectionCard(QFrame):
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(16, 14, 16, 14)
-        self.layout.setSpacing(9)
+        self.layout.setContentsMargins(0, 8, 0, 8)
+        self.layout.setSpacing(10)
         if title:
             header = QHBoxLayout()
             title_label = QLabel(title)
@@ -155,9 +167,9 @@ class PageHeader(QWidget):
         secondary_action: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(20)
         text_box = QVBoxLayout()
         text_box.setSpacing(5)
         title_label = QLabel(title)
@@ -168,7 +180,7 @@ class PageHeader(QWidget):
         subtitle_label.setMinimumWidth(0)
         text_box.addWidget(title_label)
         text_box.addWidget(subtitle_label)
-        layout.addLayout(text_box)
+        layout.addLayout(text_box, 1)
         actions = QHBoxLayout()
         actions.setSpacing(10)
         if secondary_text and secondary_action:
@@ -180,7 +192,6 @@ class PageHeader(QWidget):
             primary.setObjectName("PrimaryButton")
             primary.clicked.connect(primary_action)
             actions.addWidget(primary)
-        actions.addStretch()
         if secondary_text or primary_text:
             layout.addLayout(actions)
 
@@ -199,6 +210,7 @@ class MetricCard(SectionCard):
     def __init__(self, title: str, value: str, subtitle: str) -> None:
         super().__init__()
         self.setObjectName("MetricCard")
+        self.layout.setContentsMargins(16, 14, 16, 14)
         self.layout.addWidget(_label(title, "MetricTitle"))
         self.layout.addWidget(_label(value, "MetricValue"))
         body = _label(subtitle, "MutedText")
@@ -217,6 +229,7 @@ class EmptyState(SectionCard):
     ) -> None:
         super().__init__()
         self.setObjectName("EmptyState")
+        self.layout.setContentsMargins(22, 22, 22, 22)
         self.layout.addWidget(_label(title, "EmptyTitle"))
         body = _label(message, "MutedText")
         body.setWordWrap(True)
@@ -235,6 +248,7 @@ class LoadingState(SectionCard):
     def __init__(self, message: str = "正在加载公开数据源...") -> None:
         super().__init__()
         self.setObjectName("LoadingState")
+        self.layout.setContentsMargins(18, 16, 18, 16)
         self.layout.addWidget(_label(message, "MutedText"))
 
 
@@ -242,7 +256,7 @@ class PreviewNotice(SectionCard):
     def __init__(self) -> None:
         super().__init__(
             "当前模式",
-            "正在使用公开数据源和用户配置的免费 API key。未配置的数据源会自动跳过；网络或 provider 不可用时显示错误状态，不伪造数据。",
+            "默认使用开源项目组合和公开无 key 数据源。高级 API provider 默认关闭；网络或 provider 不可用时显示错误状态，不伪造数据。",
         )
         self.setObjectName("PreviewNotice")
         self.layout.addWidget(StatusBadge(APP_MODE_LABEL, "info"))
@@ -310,7 +324,7 @@ class InfoRow(QWidget):
         layout.setSpacing(12)
         key = QLabel(label)
         key.setObjectName("FieldLabel")
-        key.setFixedWidth(118)
+        key.setFixedWidth(132)
         val = QLabel(value or "暂无数据")
         val.setObjectName("FieldValue")
         val.setWordWrap(True)
@@ -356,6 +370,152 @@ class CollapsibleSection(SectionCard):
         text = self.toggle.text()
         title = text.replace("展开 ", "").replace("收起 ", "")
         self.toggle.setText(("收起 " if self._expanded else "展开 ") + title)
+
+
+class Divider(QFrame):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.HLine)
+        self.setObjectName("Divider")
+        self.setFixedHeight(1)
+
+
+class CompanyAvatar(QLabel):
+    def __init__(self, name: str) -> None:
+        initial = next((char.upper() for char in name.strip() if char.isalnum()), "C")
+        super().__init__(initial)
+        self.setObjectName("Avatar")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedSize(40, 40)
+
+
+class IconButton(QToolButton):
+    def __init__(self, *, tooltip: str, standard_icon: QStyle.StandardPixmap) -> None:
+        super().__init__()
+        self.setIcon(self.style().standardIcon(standard_icon))
+        self.setIconSize(QSize(17, 17))
+        self.setToolTip(tooltip)
+        self.setAccessibleName(tooltip)
+        self.setFixedSize(36, 36)
+
+
+class ListRow(QFrame):
+    activated = Signal()
+
+    def __init__(
+        self,
+        title: str,
+        subtitle: str,
+        *,
+        detail: str | None = None,
+        source: str | None = None,
+        action_tooltip: str | None = None,
+        action: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.setObjectName("ListRow")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 10, 8, 10)
+        layout.setSpacing(12)
+        layout.addWidget(CompanyAvatar(title))
+        text = QVBoxLayout()
+        text.setSpacing(3)
+        heading = QLabel(title)
+        heading.setObjectName("ListTitle")
+        heading.setWordWrap(True)
+        meta = QLabel(subtitle)
+        meta.setObjectName("MutedText")
+        meta.setWordWrap(True)
+        text.addWidget(heading)
+        text.addWidget(meta)
+        if detail:
+            description = QLabel(detail)
+            description.setObjectName("Caption")
+            description.setWordWrap(True)
+            description.setMaximumHeight(38)
+            text.addWidget(description)
+        layout.addLayout(text, 1)
+        if source:
+            layout.addWidget(StatusBadge(source, "neutral"))
+        if action and action_tooltip:
+            button = IconButton(tooltip=action_tooltip, standard_icon=QStyle.StandardPixmap.SP_DialogYesButton)
+            button.clicked.connect(action)
+            layout.addWidget(button)
+        arrow = IconButton(tooltip="查看详情", standard_icon=QStyle.StandardPixmap.SP_ArrowForward)
+        arrow.clicked.connect(self.activated.emit)
+        layout.addWidget(arrow)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt override
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit()
+        super().mouseReleaseEvent(event)
+
+
+class NewsRow(QFrame):
+    def __init__(
+        self,
+        title: str,
+        meta: str,
+        snippet: str | None,
+        *,
+        open_action: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.setObjectName("ListRow")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 12, 8, 12)
+        layout.setSpacing(12)
+        text = QVBoxLayout()
+        text.setSpacing(4)
+        heading = QLabel(title)
+        heading.setObjectName("ListTitle")
+        heading.setWordWrap(True)
+        source = QLabel(meta)
+        source.setObjectName("Caption")
+        text.addWidget(heading)
+        text.addWidget(source)
+        if snippet:
+            body = QLabel(snippet[:260])
+            body.setObjectName("MutedText")
+            body.setWordWrap(True)
+            body.setMaximumHeight(42)
+            text.addWidget(body)
+        layout.addLayout(text, 1)
+        if open_action:
+            button = IconButton(tooltip="打开原文", standard_icon=QStyle.StandardPixmap.SP_ArrowForward)
+            button.clicked.connect(open_action)
+            layout.addWidget(button)
+
+
+class MetricCell(QWidget):
+    def __init__(self, label: str, value: str) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 18, 4)
+        layout.setSpacing(3)
+        key = QLabel(label)
+        key.setObjectName("MetricTitle")
+        val = QLabel(value)
+        val.setObjectName("MetricValue")
+        val.setWordWrap(True)
+        layout.addWidget(key)
+        layout.addWidget(val)
+
+
+class InlineError(QFrame):
+    def __init__(self, message: str, *, retry: Callable[[], None] | None = None) -> None:
+        super().__init__()
+        self.setObjectName("InlineError")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        label = QLabel(sanitize_error_message(message))
+        label.setWordWrap(True)
+        layout.addWidget(label, 1)
+        if retry:
+            button = QPushButton("重试")
+            button.clicked.connect(retry)
+            layout.addWidget(button)
 
 
 class PlaceholderChart(SectionCard):
@@ -412,7 +572,7 @@ def scroll_container() -> tuple[QScrollArea, QWidget, QVBoxLayout]:
     content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     layout = QVBoxLayout(content)
     layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(16)
+    layout.setSpacing(24)
     scroll.setWidget(content)
     return scroll, content, layout
 

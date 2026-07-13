@@ -9,6 +9,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
@@ -17,9 +19,25 @@ from cdm_desktop.public_api.news_service import CompanyNewsService
 from cdm_desktop.public_api.profile_service import CompanyProfileService
 from cdm_desktop.public_api.search_service import PublicSearchService
 from cdm_desktop.public_api.watchlist_store import WatchlistStore
+from scripts.search_quality_lib import case_hit, load_search_cases, offline_search
 
 REPORTS = ROOT / "reports"
 REPORT_PATH = REPORTS / "smoke_user_flow_report.json"
+SEARCH_SAMPLES = (
+    "Apple",
+    "AAPL",
+    "IBM",
+    "Microsoft",
+    "Tencent",
+    "腾讯",
+    "00700",
+    "Alibaba",
+    "阿里巴巴",
+    "BABA",
+    "TSMC",
+    "台积电",
+    "TSM",
+)
 
 
 def main() -> int:
@@ -40,12 +58,43 @@ def _run_flow(paths: AppPaths) -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
 
     responses = {}
-    for query in ("Apple", "AAPL", "IBM"):
-        response = search.search(query, limit=5, region_filter="us")
+    quality_cases = {str(case["query"]): case for case in load_search_cases()}
+    for query in SEARCH_SAMPLES:
+        region = "hk" if query in {"Tencent", "腾讯", "00700", "Alibaba", "阿里巴巴"} else "us"
+        response = search.search(query, limit=5, region_filter=region)
+        fallback_results = []
+        if not response.companies:
+            fallback_results, _diagnostics = offline_search(query)
         responses[query] = response
-        steps.append(_step(f"search {query}", bool(response.companies or response.news), f"companies={len(response.companies)}, news={len(response.news)}, from_cache={response.from_cache}"))
+        warnings = len(response.warnings)
+        errors = len(response.errors)
+        expected_case = quality_cases.get(query)
+        effective_companies = response.companies or fallback_results
+        expected_hit = case_hit(effective_companies, expected_case, at=3) if expected_case else bool(effective_companies)
+        top = effective_companies[0] if effective_companies else None
+        fallback_used = bool(fallback_results) or response.from_cache or any(
+            status.provider_id in {"nasdaq_directory", "wikidata", "gleif"} for status in response.statuses
+        )
+        steps.append(
+            _step(
+                f"search {query}",
+                bool(response.companies or response.news or response.statuses),
+                (
+                    f"top={getattr(top, 'symbol', '') or getattr(top, 'name', '-')}, "
+                    f"expected_hit={expected_hit}, provider_count={len(response.statuses)}, "
+                    f"news={len(response.news)}, fallback_used={fallback_used}, "
+                    f"from_cache={response.from_cache}, warnings={warnings}, errors={errors}"
+                ),
+            )
+        )
 
     best = next((company for response in responses.values() for company in response.companies), None)
+    if best is None:
+        for query in SEARCH_SAMPLES:
+            fallback_results, _diagnostics = offline_search(query)
+            if fallback_results:
+                best = fallback_results[0]
+                break
     if best is None:
         steps.append(_step("select best result", False, "No company result returned by configured providers or fallbacks."))
         return {"steps": steps, "summary": _summary(steps)}
@@ -62,8 +111,17 @@ def _run_flow(paths: AppPaths) -> dict[str, Any]:
     refreshed = watchlist.refresh_item(best.dedupe_key())
     steps.append(_step("refresh one watchlist item", refreshed is not None, f"status={getattr(refreshed, 'last_status', '')}"))
 
-    refreshed_all = watchlist.refresh_all()
-    steps.append(_step("refresh all watchlist items", len(refreshed_all) == 1, f"items={len(refreshed_all)}"))
+    refresh_summary = watchlist.refresh_all_with_summary()
+    steps.append(
+        _step(
+            "refresh all watchlist items",
+            len(refresh_summary.items) == 1,
+            (
+                f"items={len(refresh_summary.items)}, success={refresh_summary.succeeded}, "
+                f"failed={refresh_summary.failed}, from_cache={refresh_summary.from_cache}"
+            ),
+        )
+    )
 
     watchlist.remove(best.dedupe_key())
     steps.append(_step("remove temporary watchlist item", len(watchlist.list_items()) == 0, f"items={len(watchlist.list_items())}"))

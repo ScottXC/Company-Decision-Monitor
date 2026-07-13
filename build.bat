@@ -8,7 +8,7 @@ call conda activate cdm-desktop >nul 2>nul
 if not errorlevel 1 (
   set "PYTHON_EXE=python"
 ) else (
-  echo Warning: failed to activate conda environment cdm-desktop.
+  echo Info: conda environment cdm-desktop not active; trying next Python candidate.
 )
 
 if "%PYTHON_EXE%"=="" (
@@ -16,7 +16,7 @@ if "%PYTHON_EXE%"=="" (
   if not errorlevel 1 (
     set "PYTHON_EXE=python"
   ) else (
-    echo Warning: failed to activate conda environment cdm.
+    echo Info: conda environment cdm not active; trying local Python paths.
   )
 )
 
@@ -35,7 +35,7 @@ if "%PYTHON_EXE%"=="" (
 )
 
 if "%PYTHON_EXE%"=="" (
-  echo Continuing with the current Python environment.
+  echo Info: using current Python environment.
   python --version >nul 2>nul
   if errorlevel 1 (
     echo Python is not available in the current environment.

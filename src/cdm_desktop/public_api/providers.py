@@ -1,10 +1,17 @@
 ﻿from __future__ import annotations
 
 import csv
+import json
+import sqlite3
+import threading
+import time
 from abc import ABC, abstractmethod
-from datetime import datetime
 from io import StringIO
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
+
+import feedparser
 
 from cdm_desktop.public_api.cache import ApiCache, cache_key
 from cdm_desktop.public_api.http_client import PublicHttpClient
@@ -16,11 +23,19 @@ from cdm_desktop.public_api.models import (
     ProviderError,
     ProviderMeta,
 )
-from cdm_desktop.public_api.query import fuzzy_score
+from cdm_desktop.public_api.provider_health import utc_timestamp
+from cdm_desktop.public_api.query import (
+    fuzzy_score,
+    normalize_cn_symbol,
+    normalize_hk_symbol,
+    remove_company_suffix,
+)
+from cdm_desktop.public_api.seed_aliases import expand_query_aliases
 from cdm_desktop.public_api.xueqiu_external_link import build_xueqiu_external_link
 
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NASDAQ_OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+SYMBOL_UNIVERSE_PATH = Path(__file__).resolve().parents[1] / "resources" / "symbol_universe" / "symbol_universe.sqlite"
 
 
 class PublicProvider(ABC):
@@ -264,6 +279,423 @@ class MarketauxProvider(PublicProvider):
         return news[:limit], None if news else ProviderError(self.meta.provider_id, "empty", "Marketaux returned no news.")
 
 
+class RssNewsProvider(PublicProvider):
+    def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
+        news, error = self.news(company_name=query, limit=limit)
+        return [], news, error
+
+    def news(self, *, symbol: str = "", company_name: str = "", limit: int = 20) -> tuple[list[NewsItem], ProviderError | None]:
+        query = (company_name or symbol).strip()
+        if not query:
+            return [], ProviderError(self.meta.provider_id, "empty", "RSS news requires a query.")
+        rows: list[NewsItem] = []
+        errors: list[ProviderError] = []
+        for provider_name, url in _rss_search_urls(query):
+            text, error = self.http.get_text(self.meta.provider_id, url)
+            if error:
+                errors.append(error)
+                continue
+            rows.extend(parse_rss_news(text or "", query=query, provider_name=provider_name))
+            if len(rows) >= limit:
+                break
+        if rows:
+            return rows[:limit], None
+        return [], errors[0] if errors else ProviderError(self.meta.provider_id, "empty", "RSS news returned no items.")
+
+
+class SymbolUniverseProvider(PublicProvider):
+    """Read the bundled FinanceDatabase-generated search index.
+
+    The runtime app uses this compact SQLite index instead of importing the
+    FinanceDatabase package. It is search metadata only, not realtime market data.
+    """
+
+    index_path = SYMBOL_UNIVERSE_PATH
+    FUZZY_SHORTLIST_LIMIT = 200
+
+    def __init__(
+        self,
+        meta: ProviderMeta,
+        key_store: ApiKeyStore,
+        http: PublicHttpClient,
+        cache: ApiCache | None = None,
+    ) -> None:
+        super().__init__(meta, key_store, http, cache)
+        self._exact_symbols: dict[str, list[dict[str, Any]]] | None = None
+        self._exact_lock = threading.Lock()
+        self._metadata: dict[str, Any] | None = None
+        self.last_timing: dict[str, float | int] = {}
+
+    def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
+        if not self.index_path.exists():
+            return [], [], ProviderError(
+                self.meta.provider_id,
+                "index_missing",
+                "内置开源证券索引缺失，已跳过该搜索源。",
+            )
+        started = time.perf_counter()
+        try:
+            rows, metadata = self._query_index(query, min(max(limit * 10, 80), self.FUZZY_SHORTLIST_LIMIT))
+        except sqlite3.DatabaseError:
+            return [], [], ProviderError(
+                self.meta.provider_id,
+                "index_corrupted",
+                "内置开源证券索引无法读取，可能已损坏。",
+            )
+        except OSError:
+            return [], [], ProviderError(
+                self.meta.provider_id,
+                "provider_unavailable",
+                "内置开源证券索引暂时不可用。",
+            )
+        query_ms = (time.perf_counter() - started) * 1000
+        fuzzy_started = time.perf_counter()
+        results = parse_symbol_universe_records(
+            rows,
+            query,
+            provider_id=self.meta.provider_id,
+            provider=self.meta.display_name,
+            source_url="https://github.com/JerBouma/FinanceDatabase",
+            generated_at=str(metadata.get("generated_at") or ""),
+        )
+        ranked = results[:limit]
+        self.last_timing = {
+            "sqlite_ms": query_ms,
+            "fuzzy_ms": (time.perf_counter() - fuzzy_started) * 1000,
+            "shortlist_size": len(rows),
+        }
+        return ranked, [], None if ranked else ProviderError(
+            self.meta.provider_id,
+            "empty",
+            "内置开源证券索引没有返回匹配公司。",
+        )
+
+    def profile(self, company: CompanyResult) -> tuple[CompanyProfile | None, ProviderError | None]:
+        if not company.symbol:
+            return None, ProviderError(self.meta.provider_id, "empty", "内置开源证券索引详情需要 symbol。")
+        if not self.index_path.exists():
+            return None, ProviderError(self.meta.provider_id, "index_missing", "内置开源证券索引缺失。")
+        raw = dict(company.raw or {})
+        try:
+            conn = sqlite3.connect(f"{self.index_path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    "SELECT * FROM symbols WHERE normalized_symbol = ? LIMIT 1",
+                    (_normalize_symbol_for_index(company.symbol),),
+                ).fetchone()
+                if row:
+                    raw.update(dict(row))
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError:
+            return None, ProviderError(self.meta.provider_id, "index_corrupted", "内置开源证券索引无法读取。")
+
+        instrument_type = _clean(raw.get("instrument_type"))
+        aliases = _symbol_universe_aliases(
+            company.symbol,
+            _clean(raw.get("name")) or company.name,
+            _clean(raw.get("aliases_json")),
+        )
+        profile = CompanyProfile(
+            id=_clean(raw.get("id")),
+            display_name=_clean(raw.get("name")) or company.display_name or company.name,
+            legal_name=_clean(raw.get("name")) or company.legal_name,
+            aliases=aliases,
+            symbol=_display_symbol_for_symbol_universe(_clean(raw.get("symbol")) or company.symbol),
+            normalized_symbol=_normalize_symbol_for_index(_clean(raw.get("symbol")) or company.symbol),
+            exchange=_clean(raw.get("exchange")) or company.exchange,
+            market=_clean(raw.get("market")) or company.market,
+            country=_clean(raw.get("country")) or company.country,
+            sector=_clean(raw.get("sector")),
+            industry=_clean(raw.get("industry")),
+            currency=_clean(raw.get("currency")),
+            instrument_type=instrument_type,
+            is_listed=True,
+            is_etf=instrument_type.casefold() == "etf",
+            is_fund=instrument_type.casefold() == "fund",
+            company_type="listed_company",
+            official_source_url="https://github.com/JerBouma/FinanceDatabase",
+            source_urls=["https://github.com/JerBouma/FinanceDatabase"],
+            provider_sources=["symbol_universe"],
+            updated_at=_clean(raw.get("index_generated_at")) or _now(),
+            raw={
+                **raw,
+                "from_local_index": True,
+                "source_note": "Bundled open-source symbol universe; not realtime market data.",
+            },
+        )
+        profile.field_sources = _field_sources(profile, "symbol_universe")
+        return profile, None
+
+    def _query_index(self, query: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        terms = _symbol_universe_query_terms(query)
+        rows_by_id: dict[int, dict[str, Any]] = {}
+        conn = sqlite3.connect(f"{self.index_path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            table = "symbols" if _sqlite_object_exists(conn, "symbols") else "symbol_universe"
+            metadata = self._load_metadata(conn)
+            for term in terms:
+                normalized_symbol = _normalize_symbol_for_index(term)
+                for row in self._exact_symbol_rows(conn, table, normalized_symbol, limit):
+                    rows_by_id.setdefault(int(row["id"]), row)
+                if len(rows_by_id) >= limit:
+                    break
+
+            # High-confidence seed aliases already expanded to exact symbols. Returning
+            # this bounded set avoids broad prefix/FTS work for common names and tickers.
+            if rows_by_id:
+                return list(rows_by_id.values())[:limit], metadata
+
+            has_aliases = _sqlite_object_exists(conn, "aliases")
+            normalized_terms = _normalized_local_terms(terms)
+            if has_aliases:
+                for term in normalized_terms:
+                    for row in conn.execute(
+                        f"""
+                        SELECT s.* FROM {table} s
+                        JOIN aliases a ON a.symbol_id = s.id
+                        WHERE a.normalized_alias = ?
+                        LIMIT ?
+                        """,
+                        (term, limit),
+                    ):
+                        rows_by_id.setdefault(int(row["id"]), dict(row))
+                    if len(rows_by_id) >= limit:
+                        break
+
+            for term in normalized_terms[:8]:
+                if len(rows_by_id) >= limit:
+                    break
+                upper_bound = f"{term}\uffff"
+                for row in conn.execute(
+                    f"""
+                    SELECT * FROM {table}
+                    WHERE (normalized_name >= ? AND normalized_name < ?)
+                       OR (normalized_symbol >= ? AND normalized_symbol < ?)
+                    LIMIT ?
+                    """,
+                    (term, upper_bound, term.upper(), upper_bound.upper(), min(limit, 60)),
+                ):
+                    rows_by_id.setdefault(int(row["id"]), dict(row))
+
+            if has_aliases and len(rows_by_id) < limit:
+                for term in normalized_terms[:4]:
+                    if len(term) < 2:
+                        continue
+                    upper_bound = f"{term}\uffff"
+                    for row in conn.execute(
+                        f"""
+                        SELECT s.* FROM {table} s
+                        JOIN aliases a ON a.symbol_id = s.id
+                        WHERE a.normalized_alias >= ? AND a.normalized_alias < ?
+                        LIMIT ?
+                        """,
+                        (term, upper_bound, min(limit, 80)),
+                    ):
+                        rows_by_id.setdefault(int(row["id"]), dict(row))
+
+            if len(rows_by_id) < limit:
+                self._append_fts_shortlist(conn, table, normalized_terms, rows_by_id, limit)
+
+            if len(rows_by_id) < limit:
+                for term in normalized_terms[:2]:
+                    if len(term) < 3:
+                        continue
+                    for row in conn.execute(
+                        f"SELECT * FROM {table} WHERE normalized_name LIKE ? LIMIT ?",
+                        (f"%{term}%", min(limit, 100)),
+                    ):
+                        rows_by_id.setdefault(int(row["id"]), dict(row))
+        finally:
+            conn.close()
+        return list(rows_by_id.values())[:limit], metadata
+
+    def _load_metadata(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        if self._metadata is not None:
+            return self._metadata
+        metadata: dict[str, Any] = {}
+        for key, value in conn.execute("SELECT key, value FROM metadata"):
+            try:
+                metadata[str(key)] = json.loads(value)
+            except (TypeError, json.JSONDecodeError):
+                metadata[str(key)] = value
+        self._metadata = metadata
+        return metadata
+
+    def _exact_symbol_rows(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        normalized_symbol: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if self._exact_symbols is None:
+            self._exact_symbols = {}
+        cached = self._exact_symbols.get(normalized_symbol)
+        if cached is not None:
+            return cached
+        with self._exact_lock:
+            cached = self._exact_symbols.get(normalized_symbol)
+            if cached is None:
+                cached = [
+                    dict(row)
+                    for row in conn.execute(
+                        f"SELECT * FROM {table} WHERE normalized_symbol = ? LIMIT ?",
+                        (normalized_symbol, limit),
+                    )
+                ]
+                self._exact_symbols[normalized_symbol] = cached
+        return cached
+
+    @staticmethod
+    def _append_fts_shortlist(
+        conn: sqlite3.Connection,
+        table: str,
+        terms: list[str],
+        rows_by_id: dict[int, dict[str, Any]],
+        limit: int,
+    ) -> None:
+        if not _sqlite_object_exists(conn, "symbols_fts"):
+            return
+        for term in terms[:4]:
+            tokens = [token for token in term.split() if len(token) >= 2]
+            if not tokens:
+                continue
+            expression = " OR ".join(f'"{token.replace(chr(34), "")}"*' for token in tokens)
+            try:
+                rows = conn.execute(
+                    f"SELECT s.* FROM symbols_fts f JOIN {table} s ON s.id = f.rowid WHERE symbols_fts MATCH ? LIMIT ?",
+                    (expression, min(limit, 100)),
+                )
+                for row in rows:
+                    rows_by_id.setdefault(int(row["id"]), dict(row))
+            except sqlite3.OperationalError:
+                return
+            if len(rows_by_id) >= limit:
+                return
+
+
+class FinanceDatabaseProvider(PublicProvider):
+    def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
+        try:
+            import financedatabase as fd  # type: ignore[import-not-found]
+        except ImportError:
+            return [], [], ProviderError(
+                self.meta.provider_id,
+                "dependency_missing",
+                "FinanceDatabase is not installed; symbol universe fallback was skipped.",
+            )
+        try:
+            dataset = fd.Equities().select()
+            rows = _records_from_symbol_dataset(dataset)
+        except Exception:  # noqa: BLE001
+            return [], [], ProviderError(
+                self.meta.provider_id,
+                "provider_unavailable",
+                "FinanceDatabase symbol universe is unavailable in this runtime.",
+            )
+        results = parse_symbol_universe_records(rows, query, provider_id=self.meta.provider_id, provider=self.meta.display_name)
+        return results[:limit], [], None if results else ProviderError(
+            self.meta.provider_id,
+            "empty",
+            "FinanceDatabase returned no matching symbol metadata.",
+        )
+
+
+class AkShareProvider(PublicProvider):
+    def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
+        try:
+            import akshare as ak  # type: ignore[import-not-found]
+        except ImportError:
+            return [], [], ProviderError(
+                self.meta.provider_id,
+                "dependency_missing",
+                "AKShare is not installed; experimental China/HK fallback was skipped.",
+            )
+        results: list[CompanyResult] = []
+        errors: list[ProviderError] = []
+        for loader, market in (
+            ("stock_info_a_code_name", "CN"),
+            ("stock_hk_spot_em", "HK"),
+        ):
+            key = cache_key(self.meta.provider_id, loader, {"market": market}, "symbol_list")
+            cached = self.cache.get(key) if self.cache else None
+            try:
+                if isinstance(cached, list):
+                    rows = [dict(item) for item in cached if isinstance(item, dict)]
+                else:
+                    func = getattr(ak, loader)
+                    rows = _records_from_symbol_dataset(func())
+                    if self.cache and rows:
+                        self.cache.set(key, rows, ttl_seconds=86400)
+                results.extend(parse_akshare_records(rows, query, market=market))
+            except Exception:  # noqa: BLE001
+                stale = self.cache.get_stale(key) if self.cache else None
+                if isinstance(stale, list):
+                    rows = [dict(item) for item in stale if isinstance(item, dict)]
+                    results.extend(parse_akshare_records(rows, query, market=market))
+                    continue
+                errors.append(
+                    ProviderError(
+                        self.meta.provider_id,
+                        "provider_unavailable",
+                        f"AKShare {market} public symbol list is unavailable.",
+                    )
+                )
+        ranked = sorted(results, key=lambda item: item.match_score, reverse=True)[:limit]
+        if ranked:
+            return ranked, [], None
+        return [], [], errors[0] if errors else ProviderError(
+            self.meta.provider_id,
+            "empty",
+            "AKShare returned no matching China/HK symbol metadata.",
+        )
+
+    def profile(self, company: CompanyResult) -> tuple[CompanyProfile | None, ProviderError | None]:
+        query = company.symbol or company.display_name or company.name
+        if not query:
+            return None, ProviderError(self.meta.provider_id, "empty", "AKShare profile requires a symbol or company name.")
+        results, _news, error = self.search(query, limit=5)
+        if error and not results:
+            return None, error
+        best = max(
+            results,
+            key=lambda item: max(fuzzy_score(company.symbol, item.symbol), fuzzy_score(company.name, item.name)),
+            default=None,
+        )
+        if best is None:
+            return None, ProviderError(self.meta.provider_id, "empty", "AKShare did not return profile metadata.")
+        raw = best.raw
+        profile = CompanyProfile(
+            display_name=best.display_name or best.name,
+            legal_name=_clean(_first_present(raw, "公司全称", "英文名称", "name")),
+            short_name=best.name,
+            aliases=list(best.aliases),
+            symbol=best.symbol,
+            normalized_symbol=_normalize_symbol_for_index(best.symbol),
+            exchange=best.exchange,
+            market=best.market,
+            country=best.country,
+            region=_clean(_first_present(raw, "地区", "地域", "region")),
+            sector=_clean(_first_present(raw, "板块", "sector")),
+            industry=_clean(_first_present(raw, "行业", "industry")),
+            description=_clean(_first_present(raw, "公司简介", "简介", "description")),
+            business_scope=_clean(_first_present(raw, "主营业务", "经营范围", "business_scope")),
+            website=_clean(_first_present(raw, "官网", "公司网址", "website")),
+            listing_date=_clean(_first_present(raw, "上市日期", "上市时间", "listing_date")),
+            instrument_type="equity",
+            is_listed=True,
+            company_type="listed_company",
+            provider_sources=["akshare"],
+            updated_at=_now(),
+            raw={"akshare": raw, "experimental": True},
+        )
+        profile.field_sources = _field_sources(profile, "akshare")
+        return profile, None
+
+
 class GleifProvider(PublicProvider):
     def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
         params = {"page[size]": limit}
@@ -282,38 +714,78 @@ class GleifProvider(PublicProvider):
         return results, [], None if results else ProviderError(self.meta.provider_id, "empty", "GLEIF returned no results.")
 
     def profile(self, company: CompanyResult) -> tuple[CompanyProfile | None, ProviderError | None]:
-        if not company.lei:
-            return None, ProviderError(self.meta.provider_id, "empty", "GLEIF profile requires LEI.")
+        lei = company.lei
+        resolved: CompanyResult | None = None
+        if not lei:
+            names = [company.legal_name, company.display_name, company.name, *company.aliases]
+            minimum_length = 4 if company.symbol or company.country else 6
+            query = next(
+                (name for name in names if len(remove_company_suffix(name).strip()) >= minimum_length),
+                "",
+            )
+            if not query:
+                return None, ProviderError(self.meta.provider_id, "empty", "没有足够明确的法人名称用于 GLEIF 查询。")
+            candidates, _news, search_error = self.search(query, limit=8)
+            if search_error and not candidates:
+                return None, search_error
+            ranked = sorted(candidates, key=lambda item: _gleif_candidate_score(company, item), reverse=True)
+            if not ranked or _gleif_candidate_score(company, ranked[0]) < 90:
+                return None, ProviderError(self.meta.provider_id, "empty", "GLEIF 返回了歧义候选，未自动采用。")
+            if len(ranked) > 1 and _gleif_candidate_score(company, ranked[0]) - _gleif_candidate_score(company, ranked[1]) < 8:
+                return None, ProviderError(self.meta.provider_id, "empty", "GLEIF 法人名称匹配存在歧义，未自动采用。")
+            resolved = ranked[0]
+            lei = resolved.lei
         data, error = self.http.get_json(
             self.meta.provider_id,
-            f"https://api.gleif.org/api/v1/lei-records/{company.lei}",
+            f"https://api.gleif.org/api/v1/lei-records/{lei}",
         )
         if error:
             return None, error
-        results = parse_gleif_records({"data": [data.get("data")]} if isinstance(data, dict) else data, company.lei)
+        results = parse_gleif_records({"data": [data.get("data")]} if isinstance(data, dict) else data, lei)
         if not results:
             return None, ProviderError(self.meta.provider_id, "empty", "GLEIF profile returned no data.")
         result = results[0]
-        return CompanyProfile(
-            display_name=result.legal_name or result.name,
+        raw = result.raw
+        attrs = raw.get("attributes") or {}
+        entity = attrs.get("entity") or {}
+        registration = attrs.get("registration") or {}
+        legal_address = entity.get("legalAddress") or {}
+        headquarters = entity.get("headquartersAddress") or {}
+        profile = CompanyProfile(
+            display_name=company.display_name or result.legal_name or result.name,
+            legal_name=result.legal_name or result.name,
             lei=result.lei,
             country=result.country,
+            country_code=_clean(legal_address.get("country")),
+            jurisdiction=result.jurisdiction,
+            entity_status=_clean(entity.get("status")),
+            registration_status=_clean(registration.get("status")),
+            legal_address=_format_address(legal_address),
+            registered_address=_format_address(legal_address),
+            address=_format_address(headquarters) or _format_address(legal_address),
+            entity_type=_clean(entity.get("category")),
+            company_type="legal_entity",
+            official_source_url=result.source_url,
+            source_urls=[result.source_url] if result.source_url else [],
             provider_sources=["gleif"],
-            field_sources={"display_name": "gleif", "lei": "gleif", "country": "gleif"},
             updated_at=_now(),
-            raw=result.raw,
-        ), None
+            raw={"gleif": raw, "resolved_by_name": bool(resolved)},
+        )
+        profile.field_sources = _field_sources(profile, "gleif")
+        return profile, None
 
 
 class WikidataProvider(PublicProvider):
     def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
+        language = "zh" if any("\u4e00" <= char <= "\u9fff" for char in query) else "en"
         data, error = self.http.get_json(
             self.meta.provider_id,
             "https://www.wikidata.org/w/api.php",
             params={
                 "action": "wbsearchentities",
                 "format": "json",
-                "language": "en",
+                "language": language,
+                "uselang": language,
                 "type": "item",
                 "search": query,
                 "limit": limit,
@@ -327,7 +799,24 @@ class WikidataProvider(PublicProvider):
     def profile(self, company: CompanyResult) -> tuple[CompanyProfile | None, ProviderError | None]:
         qid = company.wikidata_id.strip()
         if not qid:
-            return None, ProviderError(self.meta.provider_id, "empty", "Wikidata profile requires QID.")
+            terms = [company.legal_name, company.display_name, company.name, *company.aliases]
+            terms.extend(expand_query_aliases({item for item in terms if item}, max_terms=12))
+            candidates: list[CompanyResult] = []
+            last_error: ProviderError | None = None
+            for term in list(dict.fromkeys(item.strip() for item in terms if item.strip()))[:4]:
+                found, _news, search_error = self.search(term, limit=8)
+                candidates.extend(found)
+                last_error = search_error or last_error
+                if any(_wikidata_candidate_score(company, item) >= 90 for item in found):
+                    break
+            ranked = sorted(candidates, key=lambda item: _wikidata_candidate_score(company, item), reverse=True)
+            if not ranked or _wikidata_candidate_score(company, ranked[0]) < 80:
+                return None, last_error or ProviderError(
+                    self.meta.provider_id,
+                    "empty",
+                    "未找到高置信度公开实体信息。",
+                )
+            qid = ranked[0].wikidata_id
         data, error = self.http.get_json(
             self.meta.provider_id,
             "https://www.wikidata.org/w/api.php",
@@ -344,6 +833,12 @@ class WikidataProvider(PublicProvider):
         profile = parse_wikidata_profile(data, qid)
         if not profile:
             return None, ProviderError(self.meta.provider_id, "empty", "No public entity profile is available.")
+        if not _wikidata_profile_matches_company(company, profile):
+            return None, ProviderError(
+                self.meta.provider_id,
+                "empty",
+                "Wikidata 候选与公司身份不一致，未自动采用。",
+            )
         return profile, None
 
 
@@ -415,6 +910,35 @@ class NasdaqDirectoryProvider(PublicProvider):
             return [], [], errors[0]
         return [], [], ProviderError(self.meta.provider_id, "empty", "Nasdaq Symbol Directory returned no results.")
 
+    def search_cached(
+        self, query: str, limit: int = 10
+    ) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
+        """Search downloaded directory files without performing network I/O."""
+        all_results: list[CompanyResult] = []
+        cache_found = False
+        for url, source in [(NASDAQ_LISTED_URL, "nasdaqlisted"), (NASDAQ_OTHER_LISTED_URL, "otherlisted")]:
+            key = cache_key(self.meta.provider_id, url, {}, "")
+            text = self.cache.get_stale(key) if self.cache else None
+            if not isinstance(text, str):
+                continue
+            cache_found = True
+            rows = parse_nasdaq_directory(text, query, source=source)
+            for row in rows:
+                row.from_cache = True
+            all_results.extend(rows)
+        ranked = sorted(
+            _dedupe_company_results(all_results), key=lambda item: item.match_score, reverse=True
+        )[:limit]
+        if ranked:
+            return ranked, [], None
+        state = "empty" if cache_found else "cache_miss"
+        message = (
+            "Nasdaq 本地目录缓存没有返回匹配结果。"
+            if cache_found
+            else "Nasdaq 本地目录尚未缓存，已跳过首屏查询。"
+        )
+        return [], [], ProviderError(self.meta.provider_id, state, message)
+
     def _directory_text(self, url: str) -> tuple[str | None, ProviderError | None, bool]:
         key = cache_key(self.meta.provider_id, url, {}, "")
         cached = self.cache.get(key) if self.cache else None
@@ -441,6 +965,10 @@ def provider_for(
         "fmp": FmpProvider,
         "alpha_vantage": AlphaVantageProvider,
         "marketaux": MarketauxProvider,
+        "rss": RssNewsProvider,
+        "symbol_universe": SymbolUniverseProvider,
+        "finance_database": FinanceDatabaseProvider,
+        "akshare": AkShareProvider,
         "gleif": GleifProvider,
         "wikidata": WikidataProvider,
         "opencorporates": OpenCorporatesProvider,
@@ -509,10 +1037,10 @@ def parse_fmp_profile(data: Any) -> CompanyProfile | None:
         zip_code=_clean(row.get("zip")),
         image_url=_clean(row.get("image")),
         ipo_date=_clean(row.get("ipoDate")),
-        is_etf=_clean(row.get("isEtf")),
-        is_actively_trading=_clean(row.get("isActivelyTrading")),
-        is_adr=_clean(row.get("isAdr")),
-        is_fund=_clean(row.get("isFund")),
+        is_etf=_bool_or_none(row.get("isEtf")),
+        is_actively_trading=_bool_or_none(row.get("isActivelyTrading")),
+        is_adr=_bool_or_none(row.get("isAdr")),
+        is_fund=_bool_or_none(row.get("isFund")),
         provider_sources=["fmp"],
         updated_at=_now(),
         raw={"fmp": row},
@@ -634,6 +1162,297 @@ def parse_marketaux_news(data: Any) -> list[NewsItem]:
     return results
 
 
+def parse_rss_news(text: str, *, query: str, provider_name: str = "RSS News") -> list[NewsItem]:
+    parsed = feedparser.parse(text or "")
+    entries = getattr(parsed, "entries", []) or []
+    results = []
+    for entry in entries:
+        title = _clean(getattr(entry, "title", ""))
+        if not title:
+            continue
+        results.append(
+            NewsItem(
+                id=_clean(getattr(entry, "id", "")),
+                title=title,
+                provider=provider_name,
+                provider_id="rss",
+                source=_clean(getattr(entry, "source", {}).get("title", "") if isinstance(getattr(entry, "source", {}), dict) else provider_name),
+                published_at=_clean(getattr(entry, "published", "") or getattr(entry, "updated", "")),
+                url=_clean(getattr(entry, "link", "")),
+                snippet=_clean(getattr(entry, "summary", ""))[:240],
+                entities=[{"query": query}],
+            )
+        )
+    return results
+
+
+def parse_symbol_universe_records(
+    rows: list[dict[str, Any]],
+    query: str,
+    *,
+    provider_id: str = "finance_database",
+    provider: str = "FinanceDatabase Symbol Universe",
+    source_url: str = "https://github.com/JerBouma/FinanceDatabase",
+    generated_at: str = "",
+) -> list[CompanyResult]:
+    results: list[CompanyResult] = []
+    query_terms = {query, *expand_query_aliases({query}, max_terms=16)}
+    for row in rows:
+        symbol = _clean(_first_present(row, "symbol", "Symbol", "ticker", "Ticker", "code"))
+        name = _clean(_first_present(row, "name", "Name", "company", "Company", "longName", "shortName"))
+        if not symbol and not name:
+            continue
+        aliases = _symbol_universe_aliases(symbol, name, _clean(row.get("aliases_json")))
+        score = max(
+            [
+                *[fuzzy_score(term, symbol) for term in query_terms],
+                *[fuzzy_score(term, name) for term in query_terms],
+                *[fuzzy_score(term, alias) for term in query_terms for alias in aliases],
+            ]
+        )
+        if score < 55:
+            continue
+        exchange = _clean(_first_present(row, "exchange", "Exchange", "exchangeShortName", "market"))
+        country = _clean(_first_present(row, "country", "Country"))
+        sector = _clean(_first_present(row, "sector", "Sector", "industry", "Industry"))
+        market = _market_from_symbol_universe(symbol, exchange, _clean(_first_present(row, "market", "Market", "category")))
+        display_symbol = _display_symbol_for_symbol_universe(symbol)
+        results.append(
+            CompanyResult(
+                name=name or display_symbol,
+                display_name=name or display_symbol,
+                symbol=display_symbol,
+                exchange=exchange,
+                market=market,
+                country=country,
+                aliases=aliases,
+                category="financial",
+                provider=provider,
+                provider_id=provider_id,
+                source_url=source_url,
+                match_reason="Open-source symbol universe match",
+                match_score=score,
+                updated_at=generated_at or _now(),
+                raw={
+                    "from_local_index": True,
+                    "is_realtime": False,
+                    "source": "FinanceDatabase",
+                    "index_generated_at": generated_at,
+                    "original_symbol": symbol,
+                    "currency": _clean(row.get("currency")),
+                    "sector": sector,
+                    "industry": _clean(row.get("industry")),
+                    "instrument_type": _clean(row.get("instrument_type")) or "equity",
+                    "provider_sources": [provider_id],
+                    **row,
+                },
+            )
+        )
+    return sorted(
+        results,
+        key=lambda item: (
+            item.match_score,
+            _symbol_universe_rank_bonus(query_terms, item),
+            -len(item.symbol or ""),
+        ),
+        reverse=True,
+    )
+
+
+def _symbol_universe_query_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        cleaned = _clean(value)
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            seen.add(key)
+            terms.append(cleaned)
+
+    add(query)
+    for alias in expand_query_aliases({query}, max_terms=16):
+        add(alias)
+    for term in list(terms):
+        normalized = _normalize_symbol_for_index(term)
+        add(normalized)
+        add(normalized.replace(".", "-"))
+        add(normalized.replace("-", "."))
+        _add_symbol_universe_market_variants(add, normalized)
+    return terms
+
+
+def _add_symbol_universe_market_variants(add: Any, normalized: str) -> None:
+    if normalized.startswith("HK"):
+        digits = "".join(ch for ch in normalized[2:] if ch.isdigit())
+        if digits:
+            compact = digits.lstrip("0") or digits
+            add(f"{compact.zfill(4)}.HK")
+            add(f"{compact.zfill(5)}.HK")
+            add(digits.lstrip("0") or digits)
+            add(normalize_hk_symbol(normalized))
+    elif normalized.startswith("SH"):
+        digits = normalized[2:]
+        add(f"{digits}.SS")
+        add(digits)
+        add(normalize_cn_symbol(normalized))
+    elif normalized.startswith("SZ"):
+        digits = normalized[2:]
+        add(f"{digits}.SZ")
+        add(digits)
+        add(normalize_cn_symbol(normalized))
+    elif normalized.isdigit():
+        if len(normalized) <= 5:
+            add(normalize_hk_symbol(normalized))
+            compact = normalized.lstrip("0") or normalized
+            add(f"{compact.zfill(4)}.HK")
+            add(f"{compact.zfill(5)}.HK")
+        if len(normalized) == 6:
+            cn = normalize_cn_symbol(normalized)
+            add(cn)
+            add(f"{normalized}.SS" if cn.startswith("SH") else f"{normalized}.SZ")
+
+
+def _symbol_universe_aliases(symbol: str, name: str, aliases_json: str) -> list[str]:
+    aliases: set[str] = {symbol, name, _display_symbol_for_symbol_universe(symbol)}
+    try:
+        parsed = json.loads(aliases_json) if aliases_json else []
+    except json.JSONDecodeError:
+        parsed = []
+    if isinstance(parsed, list):
+        aliases.update(str(item) for item in parsed if item)
+    if symbol.endswith(".HK"):
+        digits = symbol.split(".", 1)[0]
+        aliases.add(f"HK{digits.zfill(5)}")
+        aliases.add(digits.lstrip("0") or digits)
+        aliases.add(digits.zfill(5))
+    elif symbol.endswith(".SS"):
+        digits = symbol.split(".", 1)[0]
+        aliases.add(f"SH{digits}")
+        aliases.add(digits)
+    elif symbol.endswith(".SZ"):
+        digits = symbol.split(".", 1)[0]
+        aliases.add(f"SZ{digits}")
+        aliases.add(digits)
+    if symbol == "BRK-B":
+        aliases.add("BRK.B")
+    return sorted(_clean(item) for item in aliases if _clean(item))
+
+
+def _symbol_universe_rank_bonus(query_terms: set[str], item: CompanyResult) -> int:
+    ordered_terms = list(expand_query_aliases(query_terms, max_terms=24))
+    normalized_terms = [_normalize_symbol_for_index(term) for term in ordered_terms]
+    candidate_symbols = {_normalize_symbol_for_index(item.symbol), *(_normalize_symbol_for_index(alias) for alias in item.aliases)}
+    candidate_name = remove_company_suffix(item.name or item.display_name)
+    for index, term in enumerate(normalized_terms):
+        raw_term = ordered_terms[index]
+        cleaned_term_name = remove_company_suffix(raw_term)
+        if term in candidate_symbols:
+            return 155 - index
+        if term.isdigit() and item.symbol.startswith("HK") and item.symbol[2:].lstrip("0") == (term.lstrip("0") or term):
+            return 135 - index
+        if len(cleaned_term_name) >= 4 and cleaned_term_name in candidate_name:
+            return 120 - index
+        if term.startswith("HK"):
+            digits = "".join(ch for ch in term[2:] if ch.isdigit())
+            compact = digits.lstrip("0") or digits
+            if f"{compact.zfill(4)}.HK" in candidate_symbols or f"HK{compact.zfill(5)}" in candidate_symbols:
+                return 100 - index
+        if term.startswith("SH") and f"{term[2:]}.SS" in candidate_symbols:
+            return 100 - index
+        if term.startswith("SZ") and f"{term[2:]}.SZ" in candidate_symbols:
+            return 100 - index
+    if str(item.raw.get("instrument_type") or "").casefold() == "equity":
+        return 5
+    return 0
+
+
+def _display_symbol_for_symbol_universe(symbol: str) -> str:
+    cleaned = _clean(symbol).upper()
+    if cleaned.endswith(".HK"):
+        digits = cleaned.split(".", 1)[0]
+        return f"HK{digits.zfill(5)}"
+    if cleaned.endswith(".SS"):
+        return f"SH{cleaned.split('.', 1)[0]}"
+    if cleaned.endswith(".SZ"):
+        return f"SZ{cleaned.split('.', 1)[0]}"
+    if cleaned == "BRK-B":
+        return "BRK.B"
+    return cleaned
+
+
+def _market_from_symbol_universe(symbol: str, exchange: str, market: str) -> str:
+    cleaned = _clean(symbol).upper()
+    exchange_upper = _clean(exchange).upper()
+    if cleaned.endswith(".HK") or exchange_upper == "HKG":
+        return "HK"
+    if cleaned.endswith((".SS", ".SZ")) or exchange_upper in {"SHH", "SHZ"}:
+        return "CN"
+    if exchange_upper in {"NMS", "NYQ", "ASE", "PCX", "NGM", "NCM"}:
+        return "US"
+    return market or exchange or ""
+
+
+def _normalize_symbol_for_index(value: str) -> str:
+    return _clean(value).upper().replace("-", ".")
+
+
+def _normalized_local_terms(terms: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in terms:
+        for candidate in (remove_company_suffix(value), " ".join(value.casefold().split())):
+            cleaned = candidate.strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                normalized.append(cleaned)
+    return normalized
+
+
+def _sqlite_object_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = ? AND type IN ('table', 'view') LIMIT 1",
+        (name,),
+    ).fetchone() is not None
+
+
+def parse_akshare_records(rows: list[dict[str, Any]], query: str, *, market: str) -> list[CompanyResult]:
+    results: list[CompanyResult] = []
+    for row in rows:
+        symbol = _clean(_first_present(row, "代码", "证券代码", "symbol", "code", "Code"))
+        name = _clean(_first_present(row, "名称", "股票简称", "name", "Name", "证券简称"))
+        if not symbol and not name:
+            continue
+        score = max(fuzzy_score(query, symbol), fuzzy_score(query, name))
+        if score < 55:
+            continue
+        normalized_symbol = _akshare_symbol(symbol, market)
+        results.append(
+            CompanyResult(
+                name=name or normalized_symbol,
+                display_name=name or normalized_symbol,
+                symbol=normalized_symbol,
+                exchange=_akshare_exchange(normalized_symbol, market),
+                market=market,
+                country="China" if market == "CN" else "Hong Kong",
+                category="financial",
+                provider="AKShare Experimental China/HK",
+                provider_id="akshare",
+                source_url="https://github.com/akfamily/akshare",
+                match_reason="AKShare experimental public symbol list match",
+                match_score=score,
+                updated_at=_now(),
+                raw={
+                    "experimental": True,
+                    "from_public_interface": True,
+                    "provider_sources": ["akshare"],
+                    **row,
+                },
+            )
+        )
+    return sorted(results, key=lambda item: item.match_score, reverse=True)
+
+
 def parse_gleif_records(data: Any, query: str) -> list[CompanyResult]:
     rows = data.get("data", []) if isinstance(data, dict) else []
     results = []
@@ -707,16 +1526,36 @@ def parse_wikidata_profile(data: Any, qid: str) -> CompanyProfile | None:
         return None
     labels = entity.get("labels") or {}
     descriptions = entity.get("descriptions") or {}
+    aliases_data = entity.get("aliases") or {}
+    claims = entity.get("claims") or {}
     sitelinks = entity.get("sitelinks") or {}
     label = _language_value(labels, "en") or _language_value(labels, "zh") or qid
     description = _language_value(descriptions, "en") or _language_value(descriptions, "zh")
     title = ((sitelinks.get("enwiki") or {}).get("title") or (sitelinks.get("zhwiki") or {}).get("title") or "")
     wikipedia_url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}" if title else ""
+    aliases = []
+    for language in ("en", "zh", "zh-hans", "zh-hant"):
+        for item in aliases_data.get(language, []) if isinstance(aliases_data, dict) else []:
+            value = _clean(item.get("value")) if isinstance(item, dict) else ""
+            if value and value not in aliases:
+                aliases.append(value)
+    website = _wikidata_claim_value(claims, "P856")
+    symbol = _wikidata_claim_value(claims, "P249")
+    inception = _wikidata_claim_value(claims, "P571")
     profile = CompanyProfile(
         display_name=label,
+        legal_name=label,
+        aliases=aliases,
+        symbol=symbol,
+        normalized_symbol=_normalize_symbol_for_index(symbol),
         wikidata_id=qid,
         wikipedia_url=wikipedia_url,
+        website=website,
         description=description,
+        listing_date=inception,
+        company_type="encyclopedia_entity",
+        official_source_url=f"https://www.wikidata.org/wiki/{qid}",
+        source_urls=[url for url in [f"https://www.wikidata.org/wiki/{qid}", wikipedia_url] if url],
         provider_sources=["wikidata"],
         updated_at=_now(),
         raw={"wikidata": entity},
@@ -821,7 +1660,7 @@ def parse_nasdaq_directory(text: str, query: str, *, source: str = "nasdaqlisted
             continue
         if _clean(row.get("Test Issue")).upper() == "Y":
             continue
-        score = max(fuzzy_score(query, symbol), fuzzy_score(query, name))
+        score = _symbol_name_score(query, symbol, name)
         if score < 60:
             continue
         exchange = "NASDAQ" if source == "nasdaqlisted" else _exchange_from_otherlisted(row)
@@ -854,6 +1693,66 @@ def _dedupe_company_results(companies: list[CompanyResult]) -> list[CompanyResul
         if existing is None or company.match_score > existing.match_score:
             deduped[company.dedupe_key()] = company
     return list(deduped.values())
+
+
+def _rss_search_urls(query: str) -> list[tuple[str, str]]:
+    encoded = quote_plus(query)
+    return [
+        ("Google News RSS", f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"),
+        ("Bing News RSS", f"https://www.bing.com/news/search?q={encoded}&format=rss"),
+    ]
+
+
+def _records_from_symbol_dataset(dataset: Any) -> list[dict[str, Any]]:
+    if hasattr(dataset, "reset_index"):
+        dataset = dataset.reset_index()
+    if hasattr(dataset, "to_dict"):
+        try:
+            records = dataset.to_dict("records")
+            if isinstance(records, list):
+                return [dict(item) for item in records if isinstance(item, dict)]
+        except TypeError:
+            pass
+    if isinstance(dataset, dict):
+        rows = []
+        for key, value in dataset.items():
+            if isinstance(value, dict):
+                row = dict(value)
+                row.setdefault("symbol", key)
+                rows.append(row)
+        return rows
+    if isinstance(dataset, list):
+        return [dict(item) for item in dataset if isinstance(item, dict)]
+    return []
+
+
+def _first_present(row: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            return value
+    return ""
+
+
+def _akshare_symbol(symbol: str, market: str) -> str:
+    cleaned = _clean(symbol).upper()
+    if market == "HK":
+        digits = "".join(ch for ch in cleaned if ch.isdigit())
+        return f"HK{digits.zfill(5)}" if digits else cleaned
+    if market == "CN" and cleaned.isdigit() and len(cleaned) == 6:
+        prefix = "SH" if cleaned.startswith("6") else "SZ"
+        return f"{prefix}{cleaned}"
+    return cleaned
+
+
+def _akshare_exchange(symbol: str, market: str) -> str:
+    if market == "HK":
+        return "HKEX"
+    if symbol.startswith("SH"):
+        return "SSE"
+    if symbol.startswith("SZ"):
+        return "SZSE"
+    return market
 
 
 def _fmp_payload_error(data: Any, provider_id: str) -> ProviderError | None:
@@ -947,9 +1846,159 @@ def _exchange_from_otherlisted(row: dict[str, str]) -> str:
     )
 
 
+def _symbol_name_score(query: str, symbol: str, name: str) -> int:
+    normalized_query = _normalize_symbol_for_match(query)
+    normalized_symbol = _normalize_symbol_for_match(symbol)
+    if normalized_query and normalized_query == normalized_symbol:
+        return 100
+    return max(fuzzy_score(query, symbol), fuzzy_score(query, name))
+
+
+def _normalize_symbol_for_match(value: str) -> str:
+    return "".join(ch for ch in (value or "").upper().replace("-", ".") if ch.isalnum() or ch == ".")
+
+
 def _looks_like_lei(value: str) -> bool:
     cleaned = value.strip().upper()
     return len(cleaned) == 20 and cleaned.isalnum()
+
+
+def _wikidata_candidate_score(company: CompanyResult, candidate: CompanyResult) -> int:
+    names = [company.legal_name, company.display_name, company.name, *company.aliases]
+    candidate_names = [candidate.display_name, candidate.name, *candidate.aliases]
+    score = max(
+        (fuzzy_score(left, right) for left in names if left for right in candidate_names if right),
+        default=0,
+    )
+    description = candidate.description.casefold()
+    if description and _looks_non_organization(description):
+        return 0
+    if any(word in description for word in ("company", "corporation", "business", "企业", "公司")):
+        score = min(100, score + 4)
+    elif company.symbol and description and not _looks_like_organization(description):
+        score = min(score, 65)
+    return score
+
+
+def _wikidata_profile_matches_company(company: CompanyResult, profile: CompanyProfile) -> bool:
+    description = profile.description.casefold()
+    if description and _looks_non_organization(description):
+        return False
+    known_symbols = {
+        _normalize_symbol_for_match(company.symbol),
+        *(_normalize_symbol_for_match(alias) for alias in company.aliases),
+    }
+    profile_symbol = _normalize_symbol_for_match(profile.symbol)
+    if profile_symbol and known_symbols and profile_symbol not in known_symbols:
+        return False
+    if company.symbol and not profile_symbol and description and not _looks_like_organization(description):
+        return False
+    names = [company.legal_name, company.display_name, company.name, *company.aliases]
+    return max((fuzzy_score(name, profile.display_name) for name in names if name), default=0) >= 75
+
+
+def _looks_like_organization(description: str) -> bool:
+    terms = (
+        "company",
+        "corporation",
+        "business",
+        "enterprise",
+        "conglomerate",
+        "manufacturer",
+        "bank",
+        "insurance",
+        "technology",
+        "automotive",
+        "retailer",
+        "multinational",
+        "公司",
+        "企业",
+        "集团",
+        "银行",
+        "保险",
+    )
+    return any(term in description for term in terms)
+
+
+def _looks_non_organization(description: str) -> bool:
+    terms = (
+        "weather station",
+        "natural number",
+        "integer",
+        "village",
+        "municipality",
+        "human settlement",
+        "given name",
+        "family name",
+        "disambiguation page",
+        "film",
+        "song",
+        "album",
+        "railway station",
+    )
+    return any(term in description for term in terms)
+
+
+def _gleif_candidate_score(company: CompanyResult, candidate: CompanyResult) -> int:
+    names = [company.legal_name, company.display_name, company.name, *company.aliases]
+    candidate_name = candidate.legal_name or candidate.name
+    normalized_candidate = " ".join(candidate_name.casefold().replace(".", " ").split())
+    exact = any(
+        " ".join(name.casefold().replace(".", " ").split()) == normalized_candidate
+        for name in names
+        if name
+    )
+    score = 100 if exact else max((fuzzy_score(name, candidate_name) for name in names if name), default=0)
+    if company.country and candidate.country:
+        if _country_matches(company.country, candidate.country):
+            score = min(100, score + 8)
+        else:
+            score = max(0, score - 20)
+    if company.jurisdiction and candidate.jurisdiction and company.jurisdiction.casefold() == candidate.jurisdiction.casefold():
+        score = min(100, score + 6)
+    return score
+
+
+def _country_matches(left: str, right: str) -> bool:
+    aliases = {
+        "united states": "us",
+        "united states of america": "us",
+        "usa": "us",
+        "united kingdom": "gb",
+        "great britain": "gb",
+        "hong kong": "hk",
+        "china": "cn",
+    }
+    left_value = aliases.get(left.strip().casefold(), left.strip().casefold())
+    right_value = aliases.get(right.strip().casefold(), right.strip().casefold())
+    return left_value == right_value
+
+
+def _format_address(address: Any) -> str:
+    if not isinstance(address, dict):
+        return ""
+    lines = address.get("addressLines") or []
+    values = [*(str(item).strip() for item in lines if str(item).strip())]
+    for key in ("city", "region", "postalCode", "country"):
+        value = _clean(address.get(key))
+        if value and value not in values:
+            values.append(value)
+    return ", ".join(values)
+
+
+def _wikidata_claim_value(claims: Any, property_id: str) -> str:
+    if not isinstance(claims, dict):
+        return ""
+    for claim in claims.get(property_id, []):
+        try:
+            value = claim["mainsnak"]["datavalue"]["value"]
+        except (KeyError, TypeError):
+            continue
+        if isinstance(value, str):
+            return value.lstrip("+")[:10] if property_id == "P571" else value
+        if isinstance(value, dict) and property_id == "P571":
+            return _clean(value.get("time")).lstrip("+")[:10]
+    return ""
 
 
 def _first_row(data: Any) -> dict[str, Any]:
@@ -978,13 +2027,36 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    cleaned = str(value or "").strip().casefold()
+    if cleaned in {"true", "yes", "1"}:
+        return True
+    if cleaned in {"false", "no", "0"}:
+        return False
+    return None
+
+
 def _language_value(data: dict[str, Any], language: str) -> str:
     item = data.get(language) or {}
     return _clean(item.get("value")) if isinstance(item, dict) else ""
 
 
 def _field_sources(profile: CompanyProfile, provider_id: str) -> dict[str, str]:
-    excluded = {"raw", "field_sources", "provider_sources", "from_cache"}
+    excluded = {
+        "raw",
+        "field_sources",
+        "field_candidates",
+        "provider_sources",
+        "source_urls",
+        "data_coverage",
+        "missing_fields",
+        "from_cache",
+        "schema_version",
+    }
     return {
         field: provider_id
         for field, value in profile.to_dict().items()
@@ -993,4 +2065,4 @@ def _field_sources(profile: CompanyProfile, provider_id: str) -> dict[str, str]:
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return utc_timestamp()

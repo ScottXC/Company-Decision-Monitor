@@ -44,12 +44,14 @@ def test_preview_window_routes_open(qtbot) -> None:
     window = MainWindow(get_app_paths())
     qtbot.addWidget(window)
 
-    expected = ["工作台", "搜索公司", "自选清单", "公司档案", "数据源设置"]
+    expected = ["首页", "搜索", "自选", "设置"]
 
     assert [window.sidebar.item(index).text() for index in range(window.sidebar.count())] == expected
-    for index in range(window.sidebar.count()):
+    for index, route in enumerate(window.nav_routes):
         window.sidebar.setCurrentRow(index)
-        assert window.stack.currentIndex() == index
+        assert window.stack.currentWidget() is window.pages[route]
+    window.navigate("/company/placeholder")
+    assert window.stack.currentWidget() is window.company_detail_page
 
 
 def test_preview_pages_can_be_constructed(qtbot) -> None:
@@ -85,12 +87,10 @@ def test_homepage_shows_public_network_mode(qtbot) -> None:
     qtbot.addWidget(window)
 
     labels = [item.text() for item in window.findChildren(QLabel)]
-    assert any("Public + Free API Network Mode" in text for text in labels)
+    assert any("Open-Source Data Mode" in text for text in labels)
     assert not any("UI Preview Mode" in text for text in labels)
-    assert any("Company Decision Monitor" in text for text in labels)
-    assert any("Company Decision Monitor" in text for text in labels)
-    assert any("研究工作台" in text for text in labels)
-    assert any("自选清单" in text for text in labels)
+    assert any("公司研究" in text for text in labels)
+    assert any("我的自选" in text for text in labels)
     assert not any("从这里开始" in text for text in labels)
 
 
@@ -102,7 +102,7 @@ def test_search_placeholder_explains_keyword_types(qtbot) -> None:
     assert "公司" in placeholder
     assert "股票代码" in placeholder
     assert "简称" in placeholder
-    assert "缩写" in placeholder
+    assert placeholder == "搜索公司、股票代码或简称"
 
 
 def test_search_region_prefilter_dropdown_exists(qtbot) -> None:
@@ -117,7 +117,7 @@ def test_search_region_prefilter_dropdown_exists(qtbot) -> None:
     assert page.current_region == "us"
     assert "美国证券目录" in page.region_hint.text()
     page_labels = [label.text() for label in page.findChildren(QLabel)]
-    assert any("地区 / 国家" in text for text in page_labels)
+    assert any(text == "地区" for text in page_labels)
     assert not any("搜索顺序" in text for text in page_labels)
     assert not any("1. 地区 / 国家初筛" in text for text in page_labels)
 
@@ -128,7 +128,6 @@ def test_watchlist_empty_state_exists(qtbot, tmp_path: Path) -> None:
 
     labels = [label.text() for label in page.findChildren(QLabel)]
     assert any("暂无自选公司" in text for text in labels)
-    assert any("自选筛选" in text for text in labels)
     assert any("自选公司" in text for text in labels)
     assert not any("自选使用流程" in text for text in labels)
 
@@ -141,7 +140,7 @@ def test_settings_has_grouped_api_key_entry_and_masks_existing_key(qtbot, tmp_pa
 
     tabs = page.findChild(QTabWidget)
     assert tabs is not None
-    assert "免费 API key" in [tabs.tabText(index) for index in range(tabs.count())]
+    assert "高级数据源" in [tabs.tabText(index) for index in range(tabs.count())]
     placeholders = [edit.placeholderText() for edit in page.findChildren(QLineEdit)]
     assert any("abcd...5678" in text for text in placeholders)
     assert all("abcd1234efgh5678" not in text for text in placeholders)

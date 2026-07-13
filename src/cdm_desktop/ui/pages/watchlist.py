@@ -2,15 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QThreadPool, QUrl
+from PySide6.QtCore import QPoint, Qt, QThreadPool, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QGridLayout,
+    QComboBox,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -18,11 +17,12 @@ from PySide6.QtWidgets import (
 from cdm_desktop.paths import AppPaths
 from cdm_desktop.public_api.models import CompanyResult
 from cdm_desktop.public_api.watchlist_store import WatchlistStore
+from cdm_desktop.public_api.xueqiu_external_link import build_xueqiu_external_link
 from cdm_desktop.ui.components import (
     EmptyState,
+    ListRow,
     PageHeader,
     SectionCard,
-    StatusBadge,
     sanitize_error_message,
     scroll_container,
 )
@@ -31,7 +31,7 @@ from cdm_desktop.ui.widgets import FunctionWorker
 
 class WatchlistPage(QWidget):
     route = "/watchlist"
-    page_title = "自选清单"
+    page_title = "自选公司"
 
     def __init__(
         self,
@@ -46,8 +46,8 @@ class WatchlistPage(QWidget):
         self.on_company_selected = on_company_selected
         self.watchlist = WatchlistStore(paths)
         self.search_text = ""
+        self.sort_mode = "added"
         self.thread_pool = QThreadPool.globalInstance()
-
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         scroll, _content, self.layout = scroll_container()
@@ -56,10 +56,11 @@ class WatchlistPage(QWidget):
 
     def refresh(self) -> None:
         self._clear()
+        all_items = self.watchlist.list_items()
         self.layout.addWidget(
             PageHeader(
                 "自选公司",
-                "像自选股列表一样集中查看已保存公司；自选数据只保存在本机。",
+                f"{len(all_items)} 家公司 · 自选仅保存在本机",
                 primary_text="添加公司",
                 primary_action=lambda: self.navigate("/search"),
                 secondary_text="刷新全部",
@@ -67,140 +68,110 @@ class WatchlistPage(QWidget):
             )
         )
         self.layout.addWidget(self._toolbar())
-        items = self._filtered_items()
-        self.layout.addWidget(self._list_card(items))
+        self.layout.addWidget(self._list_section(self._filtered_items(all_items)))
         self.layout.addStretch()
 
-    def _toolbar(self) -> SectionCard:
-        card = SectionCard("自选筛选", "只筛选本机已保存的自选公司，不会触发联网搜索。")
-        row = QHBoxLayout()
+    def _toolbar(self) -> QWidget:
+        host = QWidget()
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索自选公司、标识、市场或来源")
+        self.search_input.setPlaceholderText("搜索自选")
+        self.search_input.setClearButtonEnabled(True)
         self.search_input.setText(self.search_text)
         self.search_input.textChanged.connect(self._set_filter)
-        search_btn = QPushButton("筛选")
-        search_btn.clicked.connect(self.refresh)
-        add_btn = QPushButton("去搜索添加")
-        add_btn.setObjectName("PrimaryButton")
-        add_btn.clicked.connect(lambda: self.navigate("/search"))
+        self.search_input.returnPressed.connect(self.refresh)
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItem("最近添加", "added")
+        self.sort_combo.addItem("最近刷新", "refreshed")
+        self.sort_combo.addItem("公司名称", "name")
+        self.sort_combo.addItem("股票代码", "symbol")
+        self.sort_combo.setCurrentIndex(max(0, self.sort_combo.findData(self.sort_mode)))
+        self.sort_combo.currentIndexChanged.connect(self._set_sort)
         row.addWidget(self.search_input, 1)
-        row.addWidget(search_btn)
-        row.addWidget(add_btn)
-        card.layout.addLayout(row)
-        return card
+        row.addWidget(self.sort_combo)
+        return host
 
-    def _list_card(self, items: list[CompanyResult]) -> SectionCard:
-        card = SectionCard("自选公司", f"共 {len(items)} 家 · 点击详情进入公司档案")
+    def _list_section(self, items: list[CompanyResult]) -> SectionCard:
+        section = SectionCard("公司列表")
         if not items:
-            card.layout.addWidget(
+            section.layout.addWidget(
                 EmptyState(
                     "暂无自选公司",
-                    "搜索公司后，点击“添加自选”即可集中跟踪。",
-                    action_text="去搜索公司",
+                    "搜索公司后添加自选，即可集中跟踪。",
+                    action_text="去搜索",
                     action=lambda: self.navigate("/search"),
                 )
             )
-            return card
-        card.layout.addWidget(self._list_header())
+            return section
         for company in items:
-            card.layout.addWidget(self._company_row(company))
-        return card
+            identity = company.symbol or company.lei or company.company_number or company.registry_number or "暂无标识"
+            market = company.exchange or company.market or company.jurisdiction or company.country or self._company_type(company)
+            row = ListRow(
+                company.name or company.legal_name or identity,
+                f"{identity} · {market}",
+                detail=self._status_text(company),
+                source=self._source_label(company),
+                action_tooltip="刷新公司资料",
+                action=lambda c=company: self._refresh_company(c),
+            )
+            row.activated.connect(lambda c=company: self._open_company(c))
+            row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            row.customContextMenuRequested.connect(lambda point, r=row, c=company: self._show_menu(r, point, c))
+            section.layout.addWidget(row)
+        return section
 
-    def _list_header(self) -> QWidget:
-        header = QWidget()
-        layout = QGridLayout(header)
-        layout.setContentsMargins(12, 4, 12, 4)
-        headers = ["公司", "标识", "市场 / 地区", "状态", "操作"]
-        for column, text in enumerate(headers):
-            label = QLabel(text)
-            label.setObjectName("FieldLabel")
-            layout.addWidget(label, 0, column)
-        layout.setColumnStretch(0, 3)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(2, 2)
-        layout.setColumnStretch(3, 2)
-        layout.setColumnStretch(4, 2)
-        return header
+    def _show_menu(self, row: QWidget, point: QPoint, company: CompanyResult) -> None:
+        menu = QMenu(row)
+        refresh = menu.addAction("刷新")
+        remove = menu.addAction("移除自选")
+        website = menu.addAction("打开官网") if company.website or company.source_url else None
+        xueqiu = build_xueqiu_external_link(
+            symbol=company.symbol,
+            exchange=company.exchange,
+            market=company.market,
+            company_name=company.name,
+        )
+        xueqiu_action = menu.addAction("打开雪球") if xueqiu.url else None
+        chosen = menu.exec(row.mapToGlobal(point))
+        if chosen == refresh:
+            self._refresh_company(company)
+        elif chosen == remove:
+            self._remove_company(company)
+        elif website is not None and chosen == website:
+            QDesktopServices.openUrl(QUrl(company.website or company.source_url))
+        elif xueqiu_action is not None and chosen == xueqiu_action:
+            QDesktopServices.openUrl(QUrl(xueqiu.url))
 
-    def _company_row(self, company: CompanyResult) -> SectionCard:
-        row = SectionCard()
-        row.setObjectName("WatchlistRow")
-        layout = QGridLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setHorizontalSpacing(10)
-
-        title_box = QVBoxLayout()
-        name = QLabel(company.name or company.legal_name or company.symbol or "未命名公司")
-        name.setObjectName("SectionTitle")
-        meta = QLabel(self._company_type(company))
-        meta.setObjectName("MutedText")
-        title_box.addWidget(name)
-        title_box.addWidget(meta)
-        layout.addLayout(title_box, 0, 0)
-
-        identity = company.symbol or company.lei or company.company_number or company.registry_number or "暂无标识"
-        layout.addWidget(StatusBadge(identity, "neutral"), 0, 1)
-
-        market = company.exchange or company.market or company.jurisdiction or company.country or "暂无数据"
-        market_label = QLabel(market)
-        market_label.setObjectName("MutedText")
-        market_label.setWordWrap(True)
-        layout.addWidget(market_label, 0, 2)
-
-        status_text = company.last_status or company.provider or "公开来源"
-        layout.addWidget(StatusBadge(status_text[:24], "info" if company.last_status != "refresh_failed" else "warning"), 0, 3)
-
-        actions = QHBoxLayout()
-        detail_btn = QPushButton("详情")
-        detail_btn.setObjectName("PrimaryButton")
-        detail_btn.clicked.connect(lambda _checked=False, c=company: self._open_company(c))
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(lambda _checked=False, c=company: self._refresh_company(c))
-        remove_btn = QPushButton("删除")
-        remove_btn.setObjectName("DangerButton")
-        remove_btn.clicked.connect(lambda _checked=False, c=company: self._remove_company(c))
-        actions.addWidget(detail_btn)
-        actions.addWidget(refresh_btn)
-        if company.source_url:
-            source_btn = QPushButton("来源")
-            source_btn.clicked.connect(lambda _checked=False, url=company.source_url: QDesktopServices.openUrl(QUrl(url)))
-            actions.addWidget(source_btn)
-        actions.addWidget(remove_btn)
-        layout.addLayout(actions, 0, 4)
-
-        layout.setColumnStretch(0, 3)
-        layout.setColumnStretch(1, 1)
-        layout.setColumnStretch(2, 2)
-        layout.setColumnStretch(3, 2)
-        layout.setColumnStretch(4, 2)
-        row.layout.addLayout(layout)
-        return row
-
-    def _filtered_items(self) -> list[CompanyResult]:
+    def _filtered_items(self, items: list[CompanyResult] | None = None) -> list[CompanyResult]:
+        rows = list(items if items is not None else self.watchlist.list_items())
         query = self.search_text.strip().lower()
-        items = self.watchlist.list_items()
-        if not query:
-            return items
-        filtered: list[CompanyResult] = []
-        for item in items:
-            haystack = " ".join(
-                [
-                    item.name,
-                    item.legal_name,
-                    item.symbol,
-                    item.exchange,
-                    item.market,
-                    item.country,
-                    item.jurisdiction,
-                    item.provider,
-                ]
-            ).lower()
-            if query in haystack:
-                filtered.append(item)
-        return filtered
+        if query:
+            rows = [
+                item
+                for item in rows
+                if query
+                in " ".join(
+                    [item.name, item.legal_name, item.symbol, item.exchange, item.market, item.country, item.provider]
+                ).lower()
+            ]
+        if self.sort_mode == "name":
+            rows.sort(key=lambda item: (item.name or item.display_name).casefold())
+        elif self.sort_mode == "symbol":
+            rows.sort(key=lambda item: item.symbol.casefold())
+        elif self.sort_mode == "refreshed":
+            rows.sort(key=lambda item: item.last_refreshed_at or item.updated_at, reverse=True)
+        else:
+            rows.sort(key=lambda item: item.added_at, reverse=True)
+        return rows
 
     def _set_filter(self, text: str) -> None:
         self.search_text = text
+
+    def _set_sort(self) -> None:
+        self.sort_mode = str(self.sort_combo.currentData() or "added")
+        self.refresh()
 
     def _open_company(self, company: CompanyResult) -> None:
         if self.on_company_selected:
@@ -212,38 +183,57 @@ class WatchlistPage(QWidget):
         title = company.name or company.symbol or "该公司"
         result = QMessageBox.question(
             self,
-            "删除自选",
-            f"确定将“{title}”从自选清单移除吗？\n\n这只会删除本机自选记录，不会删除缓存、搜索结果或历史数据。",
+            "移除自选",
+            f"确定将“{title}”从自选中移除吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if result != QMessageBox.StandardButton.Yes:
-            return
-        self.watchlist.remove(company.dedupe_key())
-        self.refresh()
+        if result == QMessageBox.StandardButton.Yes:
+            self.watchlist.remove(company.dedupe_key())
+            self.refresh()
 
     def _refresh_company(self, company: CompanyResult) -> None:
         worker = FunctionWorker(self.watchlist.refresh_item, company.dedupe_key())
         worker.signals.finished.connect(lambda _result: self.refresh())
-        worker.signals.error.connect(lambda message: QMessageBox.warning(self, "刷新失败", sanitize_error_message(message)))
+        worker.signals.error.connect(lambda message: self._show_refresh_error(message))
         self.thread_pool.start(worker)
 
     def _refresh_all(self) -> None:
         worker = FunctionWorker(self.watchlist.refresh_all)
         worker.signals.finished.connect(lambda _result: self.refresh())
-        worker.signals.error.connect(lambda message: QMessageBox.warning(self, "刷新失败", sanitize_error_message(message)))
+        worker.signals.error.connect(lambda message: self._show_refresh_error(message))
         self.thread_pool.start(worker)
 
-    def _company_type(self, company: CompanyResult) -> str:
-        if company.symbol or company.exchange or company.market:
+    def _show_refresh_error(self, message: str) -> None:
+        QMessageBox.warning(self, "刷新失败", sanitize_error_message(message))
+
+    @staticmethod
+    def _company_type(company: CompanyResult) -> str:
+        if company.symbol:
             return "上市公司"
         if company.lei or company.company_number or company.registry_number:
             return "法人实体"
         return "公开资料"
+
+    @staticmethod
+    def _status_text(company: CompanyResult) -> str:
+        if company.last_status == "refresh_failed":
+            return "最近刷新失败，可从右侧重试"
+        if company.last_refreshed_at:
+            return f"最近刷新 {company.last_refreshed_at}"
+        return "尚未刷新"
+
+    @staticmethod
+    def _source_label(company: CompanyResult) -> str:
+        if company.provider_id == "symbol_universe" or company.raw.get("from_local_index"):
+            return "本地索引"
+        return "公开来源"
 
     def _clear(self) -> None:
         while self.layout.count():
             item = self.layout.takeAt(0)
             widget = item.widget()
             if widget:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()

@@ -22,6 +22,21 @@ from cdm_desktop.public_api.registry import ProviderRegistry
 
 REPORTS = ROOT / "reports"
 REPORT_PATH = REPORTS / "smoke_provider_report.json"
+SEARCH_SAMPLES = (
+    "Apple",
+    "AAPL",
+    "IBM",
+    "Microsoft",
+    "Tencent",
+    "腾讯",
+    "00700",
+    "Alibaba",
+    "阿里巴巴",
+    "BABA",
+    "TSMC",
+    "台积电",
+    "TSM",
+)
 FAIL_STATES = {"invalid_key", "parse_error"}
 WARN_STATES = {
     "not_configured",
@@ -34,6 +49,7 @@ WARN_STATES = {
     "provider_unavailable",
     "empty",
     "cache_miss",
+    "dependency_missing",
 }
 
 
@@ -62,7 +78,16 @@ def main() -> int:
     http = PublicHttpClient()
     results: list[dict[str, Any]] = []
 
-    provider_ids = ["fmp", "alpha_vantage", "marketaux", "nasdaq_directory", "wikidata", "gleif"]
+    provider_ids = [
+        "symbol_universe",
+        "akshare",
+        "nasdaq_directory",
+        "wikidata",
+        "gleif",
+        "fmp",
+        "alpha_vantage",
+        "marketaux",
+    ]
     for provider_id in provider_ids:
         meta = next((item for item in registry.all() if item.provider_id == provider_id), None)
         if meta is None:
@@ -75,8 +100,9 @@ def main() -> int:
         _run_provider_checks(provider_id, provider, results, masked)
 
     report = {
-        "version": "v0.1.2",
-        "mode": "Public + Free API Network Mode",
+        "version": "v0.1.3",
+        "mode": "Open-Source Data Mode",
+        "search_samples": SEARCH_SAMPLES,
         "results": results,
         "summary": _summary(results),
     }
@@ -90,18 +116,24 @@ def main() -> int:
 
 def _run_provider_checks(provider_id: str, provider, results: list[dict[str, Any]], key_mask: str) -> None:  # noqa: ANN001
     try:
-        if provider_id == "fmp":
+        if provider_id in {"symbol_universe", "akshare"}:
+            for sample in ("Apple", "AAPL", "Tencent", "腾讯", "00700", "贵州茅台"):
+                companies, _news, error = provider.search(sample, limit=5)
+                _record_result(results, provider_id, f"search {sample}", companies, error, key_mask)
+        elif provider_id == "fmp":
             _record_error(results, provider_id, "test_connection", provider.test_connection(), key_mask)
-            companies, _news, error = provider.search("AAPL", limit=3)
-            _record_result(results, provider_id, "search AAPL", companies, error, key_mask)
+            for sample in ("AAPL", "Apple", "BABA"):
+                companies, _news, error = provider.search(sample, limit=3)
+                _record_result(results, provider_id, f"search {sample}", companies, error, key_mask)
             profile, error = provider.profile(CompanyResult("Apple Inc.", "Financial Modeling Prep", "fmp", symbol="AAPL"))
             _record_result(results, provider_id, "profile AAPL", [profile] if profile else [], error, key_mask)
             news, error = provider.news(symbol="AAPL", company_name="Apple", limit=5)
             _record_result(results, provider_id, "news AAPL", news, error, key_mask)
         elif provider_id == "alpha_vantage":
             _record_error(results, provider_id, "test_connection", provider.test_connection(), key_mask)
-            companies, _news, error = provider.search("IBM", limit=3)
-            _record_result(results, provider_id, "SYMBOL_SEARCH IBM", companies, error, key_mask)
+            for sample in ("IBM", "MSFT", "TSM"):
+                companies, _news, error = provider.search(sample, limit=3)
+                _record_result(results, provider_id, f"SYMBOL_SEARCH {sample}", companies, error, key_mask)
             profile, error = provider.profile(CompanyResult("IBM", "Alpha Vantage", "alpha_vantage", symbol="IBM"))
             _record_result(results, provider_id, "OVERVIEW IBM", [profile] if profile else [], error, key_mask)
         elif provider_id == "marketaux":
@@ -109,16 +141,18 @@ def _run_provider_checks(provider_id: str, provider, results: list[dict[str, Any
             news, error = provider.news(symbol="AAPL", company_name="Apple", limit=5)
             _record_result(results, provider_id, "news AAPL", news, error, key_mask)
         elif provider_id == "nasdaq_directory":
-            companies, _news, error = provider.search("AAPL", limit=5)
-            _record_result(results, provider_id, "search AAPL", companies, error, key_mask)
-            companies, _news, error = provider.search("Apple", limit=5)
-            _record_result(results, provider_id, "search Apple", companies, error, key_mask)
+            for sample in ("AAPL", "Apple", "IBM", "Microsoft", "TSM"):
+                companies, _news, error = provider.search(sample, limit=5)
+                _record_result(results, provider_id, f"search {sample}", companies, error, key_mask)
         elif provider_id == "wikidata":
             companies, _news, error = provider.search("Apple Inc.", limit=5)
             _record_result(results, provider_id, "search Apple Inc.", companies, error, key_mask)
             if companies:
                 profile, error = provider.profile(companies[0])
                 _record_result(results, provider_id, "profile fallback", [profile] if profile else [], error, key_mask)
+            for sample in ("Tencent", "阿里巴巴", "台积电"):
+                companies, _news, error = provider.search(sample, limit=3)
+                _record_result(results, provider_id, f"search {sample}", companies, error, key_mask)
         elif provider_id == "gleif":
             companies, _news, error = provider.search("Microsoft", limit=5)
             _record_result(results, provider_id, "name search Microsoft", companies, error, key_mask)
