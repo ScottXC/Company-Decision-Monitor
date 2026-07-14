@@ -53,6 +53,8 @@ logs/
 *.db-*
 *.sqlite
 *.sqlite3
+!src/cdm_desktop/resources/symbol_universe/symbol_universe.sqlite
+!src/cdm_desktop/resources/china_hk_symbols/china_hk_symbols.sqlite
 
 # PyInstaller and Windows installer outputs
 build/

@@ -1,0 +1,2 @@
+src/cdm_desktop/resources/symbol_universe/symbol_universe.sqlite filter=lfs diff=lfs merge=lfs -text
+src/cdm_desktop/resources/china_hk_symbols/china_hk_symbols.sqlite filter=lfs diff=lfs merge=lfs -text
