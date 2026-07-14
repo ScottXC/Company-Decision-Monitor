@@ -44,6 +44,15 @@ def main() -> int:
             "search_results": [item.to_dict() for item in search.companies[:5]],
             "selected_company": selected.to_dict(),
             "provider_call_plan": service._provider_order(selected),
+            "china_hk_index_match": (
+                selected.to_dict() if selected.provider_id == "china_hk_symbol_index" else None
+            ),
+            "akshare_provider_state": next(
+                (status.state for status in statuses if status.provider_id == "akshare"), "not_run"
+            ),
+            "akshare_function_used": (
+                (profile.raw.get("akshare") and profile.raw.get("function_used", "")) if profile else ""
+            ),
             "initial_fields": _populated(initial.to_dict()),
             "provider_statuses": [
                 {

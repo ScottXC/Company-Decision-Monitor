@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -19,7 +20,9 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from cdm_desktop.paths import AppPaths  # noqa: E402
 from cdm_desktop.public_api.models import SearchResponse, SearchTiming  # noqa: E402
+from cdm_desktop.public_api.providers import SYMBOL_UNIVERSE_PATH  # noqa: E402
 from cdm_desktop.public_api.search_service import PublicSearchService  # noqa: E402
+from cdm_desktop.public_api.seed_aliases import SEED_ALIASES  # noqa: E402
 from cdm_desktop.ui.pages.search import MAX_SEARCH_WORKER_THREADS, SearchPage  # noqa: E402
 
 SEQUENCES = [
@@ -104,7 +107,8 @@ def main() -> int:
         sequence_reports: list[dict[str, Any]] = []
         peak_active_threads = 0
 
-        for sequence_index, sequence in enumerate(SEQUENCES):
+        sequences = [*SEQUENCES, _random_unseen_sequence()]
+        for sequence_index, sequence in enumerate(sequences):
             response_start = len(service.responses)
             render_start = len(rendered_queries)
             request_ids: list[int] = []
@@ -122,7 +126,7 @@ def main() -> int:
             stale_responses = [response for response in sequence_responses if response.query != sequence[-1]]
             final_rendered = rendered_queries[-1] if len(rendered_queries) > render_start else ""
             final_symbol = rendered_symbols[-1] if len(rendered_symbols) > render_start else ""
-            expected_symbol = EXPECTED_FINAL_SYMBOLS[sequence[-1]]
+            expected_symbol = EXPECTED_FINAL_SYMBOLS.get(sequence[-1], sequence[-1])
             sequence_reports.append(
                 {
                     "queries": sequence,
@@ -152,7 +156,7 @@ def main() -> int:
 
         shutdown_clean = page.shutdown(wait_ms=1000)
         report = {
-            "version": "v0.1.3",
+            "version": "v0.1.4-generalized-search-performance-rc1",
             "passed": all(item["pass"] for item in sequence_reports)
             and shutdown_clean
             and peak_active_threads <= MAX_SEARCH_WORKER_THREADS
@@ -226,6 +230,30 @@ def _copy_for_stress(response: SearchResponse) -> SearchResponse:
 
 def _same_symbol(left: str, right: str) -> bool:
     return left.upper().replace("-", ".") == right.upper().replace("-", ".")
+
+
+def _random_unseen_sequence() -> list[str]:
+    excluded = {
+        term.casefold()
+        for seed in SEED_ALIASES
+        for term in seed.all_terms()
+    }
+    connection = sqlite3.connect(f"{SYMBOL_UNIVERSE_PATH.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        candidates = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT normalized_symbol FROM symbols "
+                "WHERE normalized_symbol GLOB '[A-Z]*' AND instr(normalized_symbol,'.')=0 "
+                "ORDER BY ((id * 1103515245 + 14013) & 2147483647) LIMIT 100"
+            )
+            if str(row[0]).casefold() not in excluded
+        ]
+    finally:
+        connection.close()
+    if len(candidates) < 20:
+        raise RuntimeError("Not enough unseen ticker candidates for switching stress test.")
+    return candidates[:20]
 
 
 if __name__ == "__main__":

@@ -75,7 +75,7 @@ def test_local_search_does_not_call_news_profile_or_public_providers(tmp_path: P
     response = service.search_local("AAPL", use_cache=False)
 
     assert response.news == []
-    assert set(called) <= {"symbol_universe", "nasdaq_directory"}
+    assert set(called) <= {"china_hk_symbol_index", "symbol_universe", "nasdaq_directory"}
     assert "akshare" not in called
     assert "wikidata" not in called
     assert "gleif" not in called
@@ -203,10 +203,11 @@ def test_offline_local_index_finds_core_companies(tmp_path: Path) -> None:
 
 def test_symbol_universe_runtime_uses_read_only_bounded_queries() -> None:
     source = (Path(__file__).parents[1] / "src" / "cdm_desktop" / "public_api" / "providers.py").read_text(encoding="utf-8")
+    manager_source = (Path(__file__).parents[1] / "src" / "cdm_desktop" / "public_api" / "search_index_manager.py").read_text(encoding="utf-8")
 
-    assert "mode=ro" in source
+    assert "mode=ro" in manager_source
     assert "aliases_json LIKE" not in source
-    assert "FUZZY_SHORTLIST_LIMIT = 200" in source
+    assert "FUZZY_SHORTLIST_LIMIT = 100" in source
 
 
 def test_akshare_symbol_lists_use_24_hour_cache(tmp_path: Path, monkeypatch) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -16,8 +17,9 @@ except ModuleNotFoundError:
 
 APP_NAME = "CompanyDecisionMonitor"
 EXE_NAME = "CompanyDecisionMonitor.exe"
-VERSION_NAME = "v0.1.3"
+VERSION_NAME = "v0.1.4-generalized-search-performance-rc1"
 SYMBOL_UNIVERSE_INDEX = Path("src") / "cdm_desktop" / "resources" / "symbol_universe" / "symbol_universe.sqlite"
+CHINA_HK_INDEX = Path("src") / "cdm_desktop" / "resources" / "china_hk_symbols" / "china_hk_symbols.sqlite"
 
 
 @dataclass(frozen=True)
@@ -130,15 +132,18 @@ def main() -> int:
 
         _phase("代码检查")
         _run([_tool("ruff"), "check", "src", "tests", "scripts"], root)
-        _run([_tool("pytest"), "--basetemp=build/pytest-temp"], root)
+        pytest_temp = f"build/pytest-temp-{os.getpid()}"
+        _run([_tool("pytest"), f"--basetemp={pytest_temp}"], root)
 
         _phase("内置开源证券索引检查")
         _ensure_symbol_universe_index(root)
+        _ensure_china_hk_index(root)
 
         _phase("PyInstaller 构建")
         _run(_pyinstaller_command(root), root)
         _verify_pyinstaller_output(dist_app_dir, exe_path)
         _run_frozen_sqlite_self_test(exe_path, root)
+        _run_frozen_akshare_self_test(exe_path, root)
         print(f"EXE: {exe_path}")
 
         _phase("便携版 zip 生成")
@@ -230,9 +235,10 @@ def _pyinstaller_command(root: Path) -> list[str]:
         command.extend(["--icon", str(icon_path)])
     for module in ["sqlite3", "_sqlite3"]:
         command.extend(["--hidden-import", module])
+    command.extend(["--collect-submodules", "akshare"])
+    command.extend(["--collect-data", "akshare"])
+    command.extend(["--collect-all", "py_mini_racer"])
     for module in [
-        "pandas",
-        "numpy",
         "scipy",
         "sklearn",
         "torch",
@@ -243,8 +249,6 @@ def _pyinstaller_command(root: Path) -> list[str]:
         "financedatabase",
         "financetoolkit",
         "yfinance",
-        "curl_cffi",
-        "akshare",
         "redis",
         "psycopg",
         "psycopg2",
@@ -297,9 +301,26 @@ def _ensure_symbol_universe_index(root: Path) -> None:
         _run([sys.executable, "scripts/build_symbol_universe.py"], root)
     if not index_path.exists():
         raise FileNotFoundError(f"Symbol universe index was not generated: {index_path}")
+    connection = sqlite3.connect(f"{index_path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        objects = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master")}
+        if not {"symbols", "aliases", "symbols_fts", "name_ngrams"}.issubset(objects):
+            raise RuntimeError("Symbol universe index is missing FTS5 or n-gram search objects.")
+    finally:
+        connection.close()
     size_mb = index_path.stat().st_size / 1024 / 1024
     print(f"Symbol universe index: {index_path}")
     print(f"Symbol universe index size: {size_mb:.2f} MB")
+
+
+def _ensure_china_hk_index(root: Path) -> None:
+    index_path = root / CHINA_HK_INDEX
+    if not index_path.exists():
+        raise FileNotFoundError(
+            "China/HK index is missing. Run scripts/build_china_hk_symbol_index.py before packaging."
+        )
+    _run([sys.executable, "scripts/validate_china_hk_index.py"], root)
+    print(f"China/HK index: {index_path} ({_format_size(index_path.stat().st_size)})")
 
 
 def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
@@ -314,12 +335,14 @@ def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
         dist_app_dir / "_internal" / "cdm_desktop" / "resources" / "app.ico",
         dist_app_dir / "_internal" / "cdm_desktop" / "resources" / "app.png",
         dist_app_dir / "_internal" / "cdm_desktop" / "resources" / "symbol_universe" / "symbol_universe.sqlite",
+        dist_app_dir / "_internal" / "cdm_desktop" / "resources" / "china_hk_symbols" / "china_hk_symbols.sqlite",
         dist_app_dir / "_internal" / "cdm_desktop" / "ui" / "theme" / "light.qss",
         dist_app_dir / "_internal" / "cdm_desktop" / "ui" / "theme" / "dark.qss",
         dist_app_dir / "_internal" / "THIRD_PARTY_NOTICES.md",
         dist_app_dir / "_internal" / "third_party" / "licenses" / "RapidFuzz_LICENSE.txt",
         dist_app_dir / "_internal" / "third_party" / "licenses" / "cleanco_LICENSE.txt",
         dist_app_dir / "_internal" / "third_party" / "licenses" / "FinanceDatabase_LICENSE.txt",
+        dist_app_dir / "_internal" / "third_party" / "licenses" / "AKShare_LICENSE.txt",
         dist_app_dir / "_internal" / "sqlite3.dll",
         dist_app_dir / "_internal" / "_sqlite3.pyd",
     ]
@@ -328,9 +351,13 @@ def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
         raise FileNotFoundError("Missing packaged static resources: " + ", ".join(str(path) for path in missing))
 
     forbidden_names = {".git", "src", "tests", "node_modules", "build"}
-    forbidden_found = [
-        path for path in dist_app_dir.rglob("*") if any(part in forbidden_names for part in path.parts)
-    ]
+    forbidden_found = []
+    for path in dist_app_dir.rglob("*"):
+        relative_parts = path.relative_to(dist_app_dir).parts
+        if any(part.endswith(".dist-info") for part in relative_parts):
+            continue
+        if any(part in forbidden_names for part in relative_parts):
+            forbidden_found.append(path)
     if forbidden_found:
         raise RuntimeError(
             "Forbidden source/cache directories found in PyInstaller output: "
@@ -350,6 +377,18 @@ def _run_frozen_sqlite_self_test(exe_path: Path, root: Path) -> None:
         raise FileNotFoundError(f"Cannot run SQLite self-test because executable is missing: {exe_path}")
     print("Running frozen SQLite self-test")
     _run([str(exe_path), "--self-test", "sqlite"], root)
+
+
+def _run_frozen_akshare_self_test(exe_path: Path, root: Path) -> None:
+    print("Running frozen AKShare import self-test")
+    report = root / "build" / "akshare-self-test.txt"
+    report.unlink(missing_ok=True)
+    environment = {**os.environ, "CDM_SELF_TEST_REPORT": str(report)}
+    completed = subprocess.run([str(exe_path), "--self-test", "akshare"], cwd=root, env=environment, check=False)
+    message = report.read_text(encoding="utf-8") if report.exists() else "No AKShare self-test report was produced."
+    print(message)
+    if completed.returncode != 0:
+        raise RuntimeError(message)
 
 
 def _build_installer(

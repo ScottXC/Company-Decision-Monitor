@@ -19,6 +19,7 @@ from cdm_desktop.public_api.models import SearchResponse  # noqa: E402
 from cdm_desktop.public_api.providers import SYMBOL_UNIVERSE_PATH  # noqa: E402
 from cdm_desktop.public_api.query import analyze_query  # noqa: E402
 from cdm_desktop.public_api.search_service import PublicSearchService  # noqa: E402
+from cdm_desktop.public_api.seed_aliases import matching_seed_aliases  # noqa: E402
 
 QUERY_EXPECTATIONS: dict[str, set[str]] = {
     "AAPL": {"AAPL"},
@@ -33,6 +34,15 @@ QUERY_EXPECTATIONS: dict[str, set[str]] = {
     "TSM": {"TSM"},
     "贵州茅台": {"SH600519", "600519"},
     "600519": {"SH600519", "600519"},
+    "比亚迪": {"SZ002594", "002594"},
+    "002594": {"SZ002594", "002594"},
+    "宁德时代": {"SZ300750", "300750"},
+    "300750": {"SZ300750", "300750"},
+    "09988": {"HK09988", "09988"},
+    "美团": {"HK03690", "03690"},
+    "3690": {"HK03690", "03690"},
+    "小米": {"HK01810", "01810"},
+    "1810": {"HK01810", "01810"},
 }
 
 THRESHOLDS_MS = {
@@ -49,13 +59,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark local-first company search.")
     parser.add_argument("--public", action="store_true", help="Measure one real public enrichment sample.")
     parser.add_argument(
+        "--cache-bypass",
+        action="store_true",
+        help="Explicitly bypass query/result caches for cold and warm regression measurements.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=ROOT / "reports" / "search_performance_report.json",
     )
     args = parser.parse_args()
 
-    report = run_benchmark(measure_public=args.public)
+    report = run_benchmark(measure_public=args.public, cache_bypass=args.cache_bypass)
     markdown_path = args.output.with_suffix(".md")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -66,13 +81,16 @@ def main() -> int:
     return 0 if report["passed"] else 1
 
 
-def run_benchmark(*, measure_public: bool = False) -> dict[str, Any]:
+def run_benchmark(*, measure_public: bool = False, cache_bypass: bool = True) -> dict[str, Any]:
     if not SYMBOL_UNIVERSE_PATH.exists():
         return {"passed": False, "error": "symbol_universe index missing", "cases": []}
 
     with tempfile.TemporaryDirectory(prefix="cdm-search-benchmark-") as temp_dir:
         paths = _paths(Path(temp_dir))
-        cases = [_benchmark_query(paths, query, expected) for query, expected in QUERY_EXPECTATIONS.items()]
+        cases = [
+            _benchmark_query(paths, query, expected, cache_bypass=cache_bypass)
+            for query, expected in QUERY_EXPECTATIONS.items()
+        ]
         public_sample = _measure_public_sample(paths) if measure_public else {
             "status": "not_measured",
             "reason": "Use --public for a live sample; local first results never wait for enrichment.",
@@ -100,8 +118,14 @@ def run_benchmark(*, measure_public: bool = False) -> dict[str, Any]:
     }
     exact_cases = [case for case in cases if case["query_kind"] != "name"]
     name_cases = [case for case in cases if case["query_kind"] == "name"]
+    known_recall = {
+        f"recall_at_{rank}": round(sum(case[f"found_at_{rank}"] for case in cases) / len(cases), 4)
+        for rank in (1, 3, 5)
+    }
     return {
-        "version": "v0.1.3",
+        "version": "v0.1.4-generalized-search-performance-rc1",
+        "benchmark_type": "known_regression_cases",
+        "cache_bypass_requested": cache_bypass,
         "passed": all(checks.values()),
         "thresholds_ms": THRESHOLDS_MS,
         "checks": checks,
@@ -112,6 +136,12 @@ def run_benchmark(*, measure_public: bool = False) -> dict[str, Any]:
             "warm_name_max_ms": _max(name_cases, "warm_local_ms"),
             "cache_hit_max_ms": _max(cases, "cache_hit_ms"),
             "rapid_repeat_max_ms": _max(cases, "rapid_repeat_max_ms"),
+            "known_case_p95_ms": _percentile([case["warm_local_ms"] for case in cases], 0.95),
+            "known_recall_at_5": round(sum(case["expected_result_found"] for case in cases) / len(cases), 4),
+            **known_recall,
+            "cache_enabled": True,
+            "cache_bypassed_for_cold_and_warm": True,
+            "seed_alias_used_count": sum(bool(matching_seed_aliases({case["query"]})) for case in cases),
         },
         "index": _index_info(),
         "cases": cases,
@@ -121,17 +151,23 @@ def run_benchmark(*, measure_public: bool = False) -> dict[str, Any]:
     }
 
 
-def _benchmark_query(paths: AppPaths, query: str, expected: set[str]) -> dict[str, Any]:
+def _benchmark_query(
+    paths: AppPaths,
+    query: str,
+    expected: set[str],
+    *,
+    cache_bypass: bool,
+) -> dict[str, Any]:
     info = analyze_query(query)
     service = PublicSearchService(paths)
-    cold_ms, cold = _timed_local(service, query, use_cache=False)
-    warm_ms, warm = _timed_local(service, query, use_cache=False)
+    cold_ms, cold = _timed_local(service, query, use_cache=False, cache_bypass=cache_bypass)
+    warm_ms, warm = _timed_local(service, query, use_cache=False, cache_bypass=cache_bypass)
     service.search_local(query, limit=20, use_cache=True)
-    cache_ms, cached = _timed_local(service, query, use_cache=True)
+    cache_ms, cached = _timed_local(service, query, use_cache=True, cache_bypass=False)
 
     repeat_times: list[float] = []
     for _index in range(RAPID_REPEAT_COUNT):
-        elapsed, _response = _timed_local(service, query, use_cache=True)
+        elapsed, _response = _timed_local(service, query, use_cache=True, cache_bypass=False)
         repeat_times.append(elapsed)
 
     background_service = PublicSearchService(paths)
@@ -142,9 +178,10 @@ def _benchmark_query(paths: AppPaths, query: str, expected: set[str]) -> dict[st
     background = background_service.enrich_search(query, warm, limit=20, use_cache=False)
     background_ms = (time.perf_counter() - background_started) * 1000
 
-    actual_symbols = {_normalize_symbol(item.symbol) for item in warm.companies if item.symbol}
+    actual_symbols = [_normalize_symbol(item.symbol) for item in warm.companies if item.symbol]
     expected_symbols = {_normalize_symbol(item) for item in expected}
-    expected_found = bool(actual_symbols & expected_symbols)
+    positions = [index for index, symbol in enumerate(actual_symbols, start=1) if symbol in expected_symbols]
+    expected_found = bool(positions)
     first = warm.companies[0] if warm.companies else None
     timing = warm.timing
     exact_limit = THRESHOLDS_MS["warm_exact"] if info.kind != "name" else THRESHOLDS_MS["warm_name"]
@@ -179,6 +216,13 @@ def _benchmark_query(paths: AppPaths, query: str, expected: set[str]) -> dict[st
         "background_started_after_local": True,
         "candidate_shortlist_size": timing.candidate_shortlist_size if timing else 0,
         "fuzzy_candidate_count": timing.fuzzy_candidate_count if timing else 0,
+        "sql_ms": round(timing.local_index_ms, 3) if timing else 0,
+        "fuzzy_ms": round(timing.fuzzy_ms, 3) if timing else 0,
+        "local_total_ms": round(timing.total_ms, 3) if timing else round(warm_ms, 3),
+        "expected_result_position": min(positions) if positions else None,
+        "found_at_1": any(position <= 1 for position in positions),
+        "found_at_3": any(position <= 3 for position in positions),
+        "found_at_5": any(position <= 5 for position in positions),
         "rapid_repeat_count": RAPID_REPEAT_COUNT,
         "rapid_repeat_mean_ms": round(sum(repeat_times) / len(repeat_times), 3),
         "rapid_repeat_max_ms": round(max(repeat_times), 3),
@@ -189,9 +233,21 @@ def _benchmark_query(paths: AppPaths, query: str, expected: set[str]) -> dict[st
     }
 
 
-def _timed_local(service: PublicSearchService, query: str, *, use_cache: bool) -> tuple[float, SearchResponse]:
+def _timed_local(
+    service: PublicSearchService,
+    query: str,
+    *,
+    use_cache: bool,
+    cache_bypass: bool,
+) -> tuple[float, SearchResponse]:
     started = time.perf_counter()
-    response = service.search_local(query, limit=20, use_cache=use_cache)
+    response = service.search_local(
+        query,
+        limit=20,
+        use_cache=use_cache,
+        bypass_query_cache=cache_bypass or not use_cache,
+        diagnostics_mode=True,
+    )
     return (time.perf_counter() - started) * 1000, response
 
 
@@ -247,27 +303,37 @@ def _max(cases: list[dict[str, Any]], key: str) -> float:
     return round(max((float(case[key]) for case in cases), default=0.0), 3)
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    index = min(len(ordered) - 1, int(round((len(ordered) - 1) * fraction)))
+    return round(float(ordered[index]), 3)
+
+
 def _markdown_report(report: dict[str, Any]) -> str:
     lines = [
         "# Search Performance Report",
         "",
         f"Overall: **{'PASS' if report.get('passed') else 'FAIL'}**",
         "",
-        "| Query | Expected | First result | Cold ms | Warm ms | Cache ms | Background ms | Shortlist | Pass |",
-        "|---|---|---|---:|---:|---:|---:|---:|---|",
+        "| Query | Expected | First | Pos | Cold | Warm | Cache | SQL | Fuzzy | Shortlist | Pass |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for case in report.get("cases", []):
         first = case.get("first_result", {})
         lines.append(
-            "| {query} | {expected} | {first} | {cold:.3f} | {warm:.3f} | {cache:.3f} | "
-            "{background:.3f} | {shortlist} | {status} |".format(
+            "| {query} | {expected} | {first} | {position} | {cold:.3f} | {warm:.3f} | {cache:.3f} | "
+            "{sql:.3f} | {fuzzy:.3f} | {shortlist} | {status} |".format(
                 query=case["query"],
                 expected=", ".join(case["expected_symbols"]),
                 first=first.get("symbol") or first.get("name") or "-",
+                position=case["expected_result_position"] or "-",
                 cold=case["cold_local_ms"],
                 warm=case["warm_local_ms"],
                 cache=case["cache_hit_ms"],
-                background=case["background_enrichment_ms"],
+                sql=case["sql_ms"],
+                fuzzy=case["fuzzy_ms"],
                 shortlist=case["candidate_shortlist_size"],
                 status="PASS" if case["pass"] else "FAIL",
             )

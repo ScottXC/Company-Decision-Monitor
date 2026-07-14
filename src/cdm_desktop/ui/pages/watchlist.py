@@ -225,7 +225,7 @@ class WatchlistPage(QWidget):
 
     @staticmethod
     def _source_label(company: CompanyResult) -> str:
-        if company.provider_id == "symbol_universe" or company.raw.get("from_local_index"):
+        if company.provider_id in {"symbol_universe", "china_hk_symbol_index"} or company.raw.get("from_local_index"):
             return "本地索引"
         return "公开来源"
 

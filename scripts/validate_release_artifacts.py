@@ -17,6 +17,7 @@ INSTALLER_SCRIPT = ROOT / "installer" / "CompanyDecisionMonitor.iss"
 REPORTS = ROOT / "reports"
 REPORT_PATH = REPORTS / "release_artifact_report.json"
 SYMBOL_INDEX_SUFFIX = "cdm_desktop/resources/symbol_universe/symbol_universe.sqlite"
+CHINA_HK_INDEX_SUFFIX = "cdm_desktop/resources/china_hk_symbols/china_hk_symbols.sqlite"
 
 REQUIRED_ZIP_SUFFIXES = (
     "CompanyDecisionMonitor.exe",
@@ -25,6 +26,8 @@ REQUIRED_ZIP_SUFFIXES = (
     "third_party/licenses/cleanco_LICENSE.txt",
     "third_party/licenses/FinanceDatabase_LICENSE.txt",
     SYMBOL_INDEX_SUFFIX,
+    CHINA_HK_INDEX_SUFFIX,
+    "third_party/licenses/AKShare_LICENSE.txt",
     "sqlite3.dll",
     "_sqlite3.pyd",
     "cdm_desktop/ui/theme/light.qss",
@@ -109,6 +112,10 @@ def main() -> int:
                 **sqlite_self_test,
             }
         )
+        akshare_self_test = _run_akshare_self_test(EXE)
+        if not akshare_self_test["passed"]:
+            failures.append(str(akshare_self_test["message"]))
+        checks.append({"check": "frozen_akshare_self_test", "status": "passed" if akshare_self_test["passed"] else "failed", **akshare_self_test})
 
     dist_root = DIST / "CompanyDecisionMonitor"
     if dist_root.exists():
@@ -121,7 +128,7 @@ def main() -> int:
     checks.append({"check": "installer_script_references", "status": "passed" if not installer_failures else "failed", "failures": installer_failures})
 
     report = {
-        "version": "v0.1.3",
+        "version": "v0.1.4-generalized-search-performance-rc1",
         "checks": checks,
         "failures": failures,
         "artifacts": {
@@ -161,11 +168,11 @@ def _validate_portable_zip(path: Path) -> list[str]:
             file_name = Path(normalized).name.lower()
             if file_name in FORBIDDEN_FILE_NAMES:
                 failures.append(f"Portable ZIP contains forbidden user/config data: {name}")
-            if parts & FORBIDDEN_PATH_PARTS:
+            if parts & FORBIDDEN_PATH_PARTS and not any(part.lower().endswith(".dist-info") for part in Path(normalized).parts):
                 failures.append(f"Portable ZIP contains forbidden path part: {name}")
             if _looks_like_crawlergo_binary(normalized):
                 failures.append(f"Portable ZIP contains crawlergo binary, which is not bundled by default: {name}")
-            if file_name.endswith((".log", ".db", ".sqlite", ".sqlite3")) and not normalized.endswith(SYMBOL_INDEX_SUFFIX):
+            if file_name.endswith((".log", ".db", ".sqlite", ".sqlite3")) and not normalized.endswith((SYMBOL_INDEX_SUFFIX, CHINA_HK_INDEX_SUFFIX)):
                 failures.append(f"Portable ZIP contains runtime data file: {name}")
     return failures
 
@@ -182,12 +189,12 @@ def _validate_dist_tree(path: Path) -> list[str]:
         parts = {part.lower() for part in file_path.relative_to(path).parts}
         if file_path.name.lower() in FORBIDDEN_FILE_NAMES:
             failures.append(f"Dist contains forbidden user/config data: {file_path}")
-        if parts & FORBIDDEN_PATH_PARTS:
+        if parts & FORBIDDEN_PATH_PARTS and not any(part.lower().endswith(".dist-info") for part in file_path.relative_to(path).parts):
             failures.append(f"Dist contains forbidden path part: {file_path}")
         relative = file_path.relative_to(path).as_posix()
         if _looks_like_crawlergo_binary(relative):
             failures.append(f"Dist contains crawlergo binary, which is not bundled by default: {file_path}")
-        if file_path.suffix.lower() in {".db", ".sqlite", ".sqlite3"} and not relative.endswith(SYMBOL_INDEX_SUFFIX):
+        if file_path.suffix.lower() in {".db", ".sqlite", ".sqlite3"} and not relative.endswith((SYMBOL_INDEX_SUFFIX, CHINA_HK_INDEX_SUFFIX)):
             failures.append(f"Dist contains runtime database/cache file: {file_path}")
         if file_path.suffix.lower() in {".pyc", ".pyo"}:
             continue
@@ -288,6 +295,29 @@ def _run_portable_sqlite_self_test(path: Path) -> dict[str, Any]:
             "stdout": "",
             "stderr": str(exc),
         }
+
+
+def _run_akshare_self_test(exe_path: Path) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            [str(exe_path), "--self-test", "akshare"],
+            cwd=exe_path.parent,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"passed": False, "message": f"AKShare self-test could not run: {exc}", "returncode": None, "stdout": "", "stderr": str(exc)}
+    stdout = (completed.stdout or "").strip()
+    passed = completed.returncode == 0 and "akshare self-test passed" in stdout.casefold()
+    return {
+        "passed": passed,
+        "message": "AKShare self-test passed" if passed else f"AKShare self-test failed with exit code {completed.returncode}",
+        "returncode": completed.returncode,
+        "stdout": stdout[-2000:],
+        "stderr": (completed.stderr or "")[-2000:],
+    }
 
 
 def _artifact(path: Path) -> dict[str, Any]:

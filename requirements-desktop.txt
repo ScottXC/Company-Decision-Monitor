@@ -11,6 +11,7 @@ lxml
 pymupdf
 rapidfuzz>=3.14,<4
 cleanco>=2.3,<3
+akshare==1.18.64
 # Build-time only: used by scripts/build_symbol_universe.py to generate the
 # bundled SQLite symbol index. Normal end users do not install or import this.
 FinanceDatabase>=2.4,<3

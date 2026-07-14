@@ -14,6 +14,11 @@ from urllib.parse import quote_plus
 import feedparser
 
 from cdm_desktop.public_api.cache import ApiCache, cache_key
+from cdm_desktop.public_api.china_hk_index import (
+    CHINA_HK_INDEX_PATH,
+    index_metadata,
+    normalize_china_hk_symbol,
+)
 from cdm_desktop.public_api.http_client import PublicHttpClient
 from cdm_desktop.public_api.key_store import ApiKeyStore
 from cdm_desktop.public_api.models import (
@@ -29,8 +34,11 @@ from cdm_desktop.public_api.query import (
     normalize_cn_symbol,
     normalize_hk_symbol,
     remove_company_suffix,
+    shortlist_fuzzy_score,
 )
-from cdm_desktop.public_api.seed_aliases import expand_query_aliases
+from cdm_desktop.public_api.search_index_manager import SearchIndexManager
+from cdm_desktop.public_api.search_query_plan import build_search_query_plan
+from cdm_desktop.public_api.seed_aliases import expand_query_aliases, seed_alias_exact_match
 from cdm_desktop.public_api.xueqiu_external_link import build_xueqiu_external_link
 
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
@@ -311,7 +319,7 @@ class SymbolUniverseProvider(PublicProvider):
     """
 
     index_path = SYMBOL_UNIVERSE_PATH
-    FUZZY_SHORTLIST_LIMIT = 200
+    FUZZY_SHORTLIST_LIMIT = 100
 
     def __init__(
         self,
@@ -324,6 +332,7 @@ class SymbolUniverseProvider(PublicProvider):
         self._exact_symbols: dict[str, list[dict[str, Any]]] | None = None
         self._exact_lock = threading.Lock()
         self._metadata: dict[str, Any] | None = None
+        self.index_manager = SearchIndexManager.for_path(self.index_path)
         self.last_timing: dict[str, float | int] = {}
 
     def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
@@ -335,7 +344,7 @@ class SymbolUniverseProvider(PublicProvider):
             )
         started = time.perf_counter()
         try:
-            rows, metadata = self._query_index(query, min(max(limit * 10, 80), self.FUZZY_SHORTLIST_LIMIT))
+            rows, metadata = self._query_index(query, min(max(limit * 5, 50), self.FUZZY_SHORTLIST_LIMIT))
         except sqlite3.DatabaseError:
             return [], [], ProviderError(
                 self.meta.provider_id,
@@ -377,17 +386,13 @@ class SymbolUniverseProvider(PublicProvider):
             return None, ProviderError(self.meta.provider_id, "index_missing", "内置开源证券索引缺失。")
         raw = dict(company.raw or {})
         try:
-            conn = sqlite3.connect(f"{self.index_path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
-            conn.row_factory = sqlite3.Row
-            try:
-                row = conn.execute(
-                    "SELECT * FROM symbols WHERE normalized_symbol = ? LIMIT 1",
-                    (_normalize_symbol_for_index(company.symbol),),
-                ).fetchone()
-                if row:
-                    raw.update(dict(row))
-            finally:
-                conn.close()
+            conn = self.index_manager.connection()
+            row = conn.execute(
+                "SELECT * FROM symbols WHERE normalized_symbol = ? LIMIT 1",
+                (_normalize_symbol_for_index(company.symbol),),
+            ).fetchone()
+            if row:
+                raw.update(dict(row))
         except sqlite3.DatabaseError:
             return None, ProviderError(self.meta.provider_id, "index_corrupted", "内置开源证券索引无法读取。")
 
@@ -430,86 +435,54 @@ class SymbolUniverseProvider(PublicProvider):
 
     def _query_index(self, query: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         terms = _symbol_universe_query_terms(query)
+        plan = build_search_query_plan(query)
         rows_by_id: dict[int, dict[str, Any]] = {}
-        conn = sqlite3.connect(f"{self.index_path.resolve().as_uri()}?mode=ro", uri=True, timeout=1.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            table = "symbols" if _sqlite_object_exists(conn, "symbols") else "symbol_universe"
-            metadata = self._load_metadata(conn)
-            for term in terms:
-                normalized_symbol = _normalize_symbol_for_index(term)
-                for row in self._exact_symbol_rows(conn, table, normalized_symbol, limit):
-                    rows_by_id.setdefault(int(row["id"]), row)
-                if len(rows_by_id) >= limit:
-                    break
+        conn = self.index_manager.connection()
+        table = "symbols"
+        metadata = self._load_metadata(conn)
+        normalized_terms = _normalized_local_terms(terms)
 
-            # High-confidence seed aliases already expanded to exact symbols. Returning
-            # this bounded set avoids broad prefix/FTS work for common names and tickers.
-            if rows_by_id:
-                return list(rows_by_id.values())[:limit], metadata
+        for term in terms:
+            normalized_symbol = _normalize_symbol_for_index(term)
+            for row in self._exact_symbol_rows(conn, table, normalized_symbol, limit):
+                rows_by_id.setdefault(int(row["id"]), row)
+        if rows_by_id and plan.query_type != "name":
+            return list(rows_by_id.values())[:limit], metadata
 
-            has_aliases = _sqlite_object_exists(conn, "aliases")
-            normalized_terms = _normalized_local_terms(terms)
-            if has_aliases:
-                for term in normalized_terms:
-                    for row in conn.execute(
-                        f"""
-                        SELECT s.* FROM {table} s
-                        JOIN aliases a ON a.symbol_id = s.id
-                        WHERE a.normalized_alias = ?
-                        LIMIT ?
-                        """,
-                        (term, limit),
-                    ):
-                        rows_by_id.setdefault(int(row["id"]), dict(row))
-                    if len(rows_by_id) >= limit:
-                        break
+        for term in normalized_terms[:12]:
+            for row in conn.execute(
+                "SELECT * FROM symbols WHERE normalized_name = ? LIMIT ?", (term, limit)
+            ):
+                rows_by_id.setdefault(int(row["id"]), dict(row))
+            for row in conn.execute(
+                "SELECT s.* FROM aliases a JOIN symbols s ON s.id=a.symbol_id "
+                "WHERE a.normalized_alias=? LIMIT ?",
+                (term, limit),
+            ):
+                rows_by_id.setdefault(int(row["id"]), dict(row))
+        if rows_by_id:
+            return list(rows_by_id.values())[:limit], metadata
 
-            for term in normalized_terms[:8]:
-                if len(rows_by_id) >= limit:
-                    break
-                upper_bound = f"{term}\uffff"
-                for row in conn.execute(
-                    f"""
-                    SELECT * FROM {table}
-                    WHERE (normalized_name >= ? AND normalized_name < ?)
-                       OR (normalized_symbol >= ? AND normalized_symbol < ?)
-                    LIMIT ?
-                    """,
-                    (term, upper_bound, term.upper(), upper_bound.upper(), min(limit, 60)),
-                ):
-                    rows_by_id.setdefault(int(row["id"]), dict(row))
+        for term in normalized_terms[:4]:
+            if len(term) < 2:
+                continue
+            upper = f"{term}\uffff"
+            for row in conn.execute(
+                "SELECT * FROM symbols WHERE normalized_name>=? AND normalized_name<? LIMIT ?",
+                (term, upper, min(limit, 60)),
+            ):
+                rows_by_id.setdefault(int(row["id"]), dict(row))
+            for row in conn.execute(
+                "SELECT s.* FROM aliases a JOIN symbols s ON s.id=a.symbol_id "
+                "WHERE a.normalized_alias>=? AND a.normalized_alias<? LIMIT ?",
+                (term, upper, min(limit, 60)),
+            ):
+                rows_by_id.setdefault(int(row["id"]), dict(row))
 
-            if has_aliases and len(rows_by_id) < limit:
-                for term in normalized_terms[:4]:
-                    if len(term) < 2:
-                        continue
-                    upper_bound = f"{term}\uffff"
-                    for row in conn.execute(
-                        f"""
-                        SELECT s.* FROM {table} s
-                        JOIN aliases a ON a.symbol_id = s.id
-                        WHERE a.normalized_alias >= ? AND a.normalized_alias < ?
-                        LIMIT ?
-                        """,
-                        (term, upper_bound, min(limit, 80)),
-                    ):
-                        rows_by_id.setdefault(int(row["id"]), dict(row))
-
-            if len(rows_by_id) < limit:
-                self._append_fts_shortlist(conn, table, normalized_terms, rows_by_id, limit)
-
-            if len(rows_by_id) < limit:
-                for term in normalized_terms[:2]:
-                    if len(term) < 3:
-                        continue
-                    for row in conn.execute(
-                        f"SELECT * FROM {table} WHERE normalized_name LIKE ? LIMIT ?",
-                        (f"%{term}%", min(limit, 100)),
-                    ):
-                        rows_by_id.setdefault(int(row["id"]), dict(row))
-        finally:
-            conn.close()
+        if len(rows_by_id) < limit and plan.allow_fuzzy:
+            self._append_fts_shortlist(conn, table, list(plan.fts_terms), rows_by_id, limit)
+        if len(rows_by_id) < limit and plan.ngrams and self.index_manager.has_object("name_ngrams"):
+            _append_ngram_shortlist(conn, table, plan.ngrams, rows_by_id, limit)
         return list(rows_by_id.values())[:limit], metadata
 
     def _load_metadata(self, conn: sqlite3.Connection) -> dict[str, Any]:
@@ -566,7 +539,8 @@ class SymbolUniverseProvider(PublicProvider):
             expression = " OR ".join(f'"{token.replace(chr(34), "")}"*' for token in tokens)
             try:
                 rows = conn.execute(
-                    f"SELECT s.* FROM symbols_fts f JOIN {table} s ON s.id = f.rowid WHERE symbols_fts MATCH ? LIMIT ?",
+                    f"SELECT s.* FROM symbols_fts f JOIN {table} s ON s.id = f.rowid "
+                    "WHERE symbols_fts MATCH ? ORDER BY bm25(symbols_fts) LIMIT ?",
                     (expression, min(limit, 100)),
                 )
                 for row in rows:
@@ -575,6 +549,36 @@ class SymbolUniverseProvider(PublicProvider):
                 return
             if len(rows_by_id) >= limit:
                 return
+
+
+def _append_ngram_shortlist(
+    connection: sqlite3.Connection,
+    table: str,
+    grams: tuple[str, ...],
+    rows_by_id: dict[int, dict[str, Any]],
+    limit: int,
+) -> None:
+    selected = tuple(dict.fromkeys(gram for gram in grams if gram))[:24]
+    if not selected:
+        return
+    placeholders = ",".join("?" for _ in selected)
+    candidate_ids = [
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT symbol_id, COUNT(DISTINCT gram) AS hits FROM name_ngrams "
+            f"WHERE gram IN ({placeholders}) GROUP BY symbol_id "
+            "ORDER BY hits DESC LIMIT ?",
+            (*selected, min(limit, 100)),
+        )
+    ]
+    if not candidate_ids:
+        return
+    id_placeholders = ",".join("?" for _ in candidate_ids)
+    for row in connection.execute(
+        f"SELECT * FROM {table} WHERE id IN ({id_placeholders}) LIMIT ?",
+        (*candidate_ids, min(limit, 100)),
+    ):
+        rows_by_id.setdefault(int(row["id"]), dict(row))
 
 
 class FinanceDatabaseProvider(PublicProvider):
@@ -602,6 +606,130 @@ class FinanceDatabaseProvider(PublicProvider):
             "empty",
             "FinanceDatabase returned no matching symbol metadata.",
         )
+
+
+class ChinaHkSymbolProvider(PublicProvider):
+    """Fast, bundled A-share and Hong Kong security master-data provider."""
+
+    index_path = CHINA_HK_INDEX_PATH
+    FUZZY_SHORTLIST_LIMIT = 100
+
+    def __init__(self, meta: ProviderMeta, key_store: ApiKeyStore, http: PublicHttpClient, cache: ApiCache | None = None) -> None:
+        super().__init__(meta, key_store, http, cache)
+        self.index_manager = SearchIndexManager.for_path(self.index_path)
+        self.last_timing: dict[str, float | int] = {}
+
+    def search(self, query: str, limit: int = 10) -> tuple[list[CompanyResult], list[NewsItem], ProviderError | None]:
+        if not self.index_path.exists():
+            return [], [], ProviderError(self.meta.provider_id, "index_missing", "内置中国及港股证券索引缺失。")
+        started = time.perf_counter()
+        try:
+            rows = self._query(query, min(max(limit * 5, 50), self.FUZZY_SHORTLIST_LIMIT))
+            metadata = index_metadata(self.index_path)
+        except sqlite3.DatabaseError:
+            return [], [], ProviderError(self.meta.provider_id, "index_corrupted", "内置中国及港股证券索引无法读取。")
+        results = [_china_hk_result(dict(row), query, self.meta, metadata) for row in rows]
+        results.sort(key=lambda item: item.match_score, reverse=True)
+        self.last_timing = {
+            "sqlite_ms": (time.perf_counter() - started) * 1000,
+            "shortlist_size": len(rows),
+            "fuzzy_ms": 0.0,
+        }
+        selected = results[:limit]
+        return selected, [], None if selected else ProviderError(self.meta.provider_id, "empty", "内置中国及港股索引没有匹配结果。")
+
+    def profile(self, company: CompanyResult) -> tuple[CompanyProfile | None, ProviderError | None]:
+        if not self.index_path.exists():
+            return None, ProviderError(self.meta.provider_id, "index_missing", "内置中国及港股证券索引缺失。")
+        symbol = normalize_china_hk_symbol(company.symbol, company.market or company.exchange)
+        try:
+            connection = self.index_manager.connection()
+            row = connection.execute("SELECT * FROM symbols WHERE normalized_symbol=? LIMIT 1", (symbol,)).fetchone()
+        except sqlite3.DatabaseError:
+            return None, ProviderError(self.meta.provider_id, "index_corrupted", "内置中国及港股证券索引无法读取。")
+        if not row:
+            return None, ProviderError(self.meta.provider_id, "empty", "内置中国及港股索引没有该证券详情。")
+        raw = dict(row)
+        profile = CompanyProfile(
+            id=str(raw.get("id") or ""),
+            display_name=_clean(raw.get("chinese_name")) or _clean(raw.get("name")) or company.display_name,
+            legal_name=_clean(raw.get("long_name")),
+            short_name=_clean(raw.get("short_name")),
+            aliases=[item for item in {_clean(raw.get("chinese_name")), _clean(raw.get("english_name")), _clean(raw.get("short_name"))} if item],
+            symbol=_clean(raw.get("symbol")),
+            normalized_symbol=_clean(raw.get("normalized_symbol")),
+            exchange=_clean(raw.get("exchange")),
+            market=_clean(raw.get("market")),
+            country=_clean(raw.get("country")),
+            region=_clean(raw.get("region")),
+            currency=_clean(raw.get("currency")),
+            sector=_clean(raw.get("sector")),
+            industry=_clean(raw.get("industry")),
+            instrument_type=_clean(raw.get("instrument_type")) or "equity",
+            listing_date=_clean(raw.get("listing_date")),
+            is_listed=True,
+            company_type="listed_company",
+            official_source_url="https://github.com/akfamily/akshare",
+            source_urls=["https://github.com/akfamily/akshare"],
+            provider_sources=[self.meta.provider_id],
+            updated_at=_clean(raw.get("generated_at")),
+            raw={**raw, "from_local_index": True, "is_realtime": False},
+        )
+        profile.field_sources = _field_sources(profile, self.meta.provider_id)
+        return profile, None
+
+    def _query(self, query: str, limit: int) -> list[sqlite3.Row]:
+        terms = expand_query_aliases({query}, max_terms=18)
+        plan = build_search_query_plan(query)
+        connection = self.index_manager.connection()
+        rows: dict[int, sqlite3.Row] = {}
+        for term in terms:
+            symbol = normalize_china_hk_symbol(term)
+            for row in connection.execute("SELECT * FROM symbols WHERE normalized_symbol=? LIMIT 4", (symbol,)):
+                rows[int(row["id"])] = row
+        if rows and plan.query_type != "name":
+            return list(rows.values())[:limit]
+        normalized_terms = [remove_company_suffix(term) for term in terms if remove_company_suffix(term)]
+        for normalized in normalized_terms[:12]:
+            for row in connection.execute("SELECT * FROM symbols WHERE normalized_name=? LIMIT ?", (normalized, limit)):
+                rows[int(row["id"])] = row
+            for row in connection.execute(
+                "SELECT s.* FROM aliases a JOIN symbols s ON s.id=a.symbol_id WHERE a.normalized_alias=? LIMIT ?",
+                (normalized, min(limit, 30)),
+            ):
+                rows[int(row["id"])] = row
+        if rows:
+            return list(rows.values())[:limit]
+        for normalized in normalized_terms[:4]:
+            upper = f"{normalized}\uffff"
+            for row in connection.execute(
+                "SELECT * FROM symbols WHERE normalized_name>=? AND normalized_name<? LIMIT ?",
+                (normalized, upper, min(limit, 60)),
+            ):
+                rows[int(row["id"])] = row
+            for row in connection.execute(
+                "SELECT s.* FROM aliases a JOIN symbols s ON s.id=a.symbol_id "
+                "WHERE a.normalized_alias>=? AND a.normalized_alias<? LIMIT ?",
+                (normalized, upper, min(limit, 60)),
+            ):
+                rows[int(row["id"])] = row
+        if len(rows) < limit and plan.ngrams and self.index_manager.has_object("name_ngrams"):
+            converted = {key: dict(value) for key, value in rows.items()}
+            _append_ngram_shortlist(connection, "symbols", plan.ngrams, converted, limit)
+            rows = {key: value for key, value in converted.items()}
+        if len(rows) < limit and plan.allow_fuzzy and self.index_manager.has_object("symbols_fts"):
+            for token in plan.fts_terms[:4]:
+                expression = f'"{token}"*'
+                try:
+                    for row in connection.execute(
+                        "SELECT s.* FROM symbols_fts f JOIN symbols s ON s.id=f.rowid "
+                        "WHERE symbols_fts MATCH ? ORDER BY bm25(symbols_fts) LIMIT ?",
+                        (expression, min(limit, 100)),
+                    ):
+                        rows[int(row["id"])] = row
+                except sqlite3.OperationalError:
+                    break
+        return list(rows.values())[:limit]
 
 
 class AkShareProvider(PublicProvider):
@@ -654,30 +782,44 @@ class AkShareProvider(PublicProvider):
         )
 
     def profile(self, company: CompanyResult) -> tuple[CompanyProfile | None, ProviderError | None]:
-        query = company.symbol or company.display_name or company.name
-        if not query:
-            return None, ProviderError(self.meta.provider_id, "empty", "AKShare profile requires a symbol or company name.")
-        results, _news, error = self.search(query, limit=5)
-        if error and not results:
-            return None, error
-        best = max(
-            results,
-            key=lambda item: max(fuzzy_score(company.symbol, item.symbol), fuzzy_score(company.name, item.name)),
-            default=None,
-        )
-        if best is None:
-            return None, ProviderError(self.meta.provider_id, "empty", "AKShare did not return profile metadata.")
-        raw = best.raw
+        symbol = normalize_china_hk_symbol(company.symbol, company.market or company.exchange)
+        if not symbol:
+            return None, ProviderError(self.meta.provider_id, "empty", "AKShare profile requires a China/HK symbol.")
+        endpoint = "stock_hk_company_profile_em" if symbol.startswith("HK") else "stock_individual_info_em"
+        key = cache_key(self.meta.provider_id, endpoint, {"symbol": symbol}, "profile")
+        cached = self.cache.get(key) if self.cache else None
+        from_cache = isinstance(cached, dict)
+        raw = dict(cached) if isinstance(cached, dict) else {}
+        if not raw:
+            try:
+                import akshare as ak  # type: ignore[import-not-found]
+
+                frame = getattr(ak, endpoint)(symbol=symbol[2:])
+                raw = _akshare_profile_dict(frame)
+                if self.cache and raw:
+                    self.cache.set(key, raw, ttl_seconds=86400)
+            except ImportError:
+                return None, ProviderError(self.meta.provider_id, "dependency_missing", "内置 AKShare 运行依赖缺失。")
+            except Exception as exc:  # noqa: BLE001
+                stale = self.cache.get_stale(key) if self.cache else None
+                if isinstance(stale, dict):
+                    raw = dict(stale)
+                    from_cache = True
+                else:
+                    state = "network_timeout" if "timeout" in str(exc).casefold() else "provider_unavailable"
+                    return None, ProviderError(self.meta.provider_id, state, "中国及港股公开资料来源暂时不可用。")
+        if not raw:
+            return None, ProviderError(self.meta.provider_id, "empty", "AKShare 未返回该公司的公开详情。")
         profile = CompanyProfile(
-            display_name=best.display_name or best.name,
+            display_name=_clean(_first_present(raw, "股票简称", "公司名称", "中文名称", "名称")) or company.display_name or company.name,
             legal_name=_clean(_first_present(raw, "公司全称", "英文名称", "name")),
-            short_name=best.name,
-            aliases=list(best.aliases),
-            symbol=best.symbol,
-            normalized_symbol=_normalize_symbol_for_index(best.symbol),
-            exchange=best.exchange,
-            market=best.market,
-            country=best.country,
+            short_name=_clean(_first_present(raw, "股票简称", "中文名称", "名称")),
+            aliases=list(company.aliases),
+            symbol=symbol,
+            normalized_symbol=symbol,
+            exchange=company.exchange or ("HKEX" if symbol.startswith("HK") else "SSE" if symbol.startswith("SH") else "SZSE"),
+            market=company.market or symbol[:2],
+            country=company.country or ("Hong Kong" if symbol.startswith("HK") else "China"),
             region=_clean(_first_present(raw, "地区", "地域", "region")),
             sector=_clean(_first_present(raw, "板块", "sector")),
             industry=_clean(_first_present(raw, "行业", "industry")),
@@ -690,7 +832,8 @@ class AkShareProvider(PublicProvider):
             company_type="listed_company",
             provider_sources=["akshare"],
             updated_at=_now(),
-            raw={"akshare": raw, "experimental": True},
+            from_cache=from_cache,
+            raw={"akshare": raw, "experimental": True, "function_used": endpoint},
         )
         profile.field_sources = _field_sources(profile, "akshare")
         return profile, None
@@ -967,6 +1110,7 @@ def provider_for(
         "marketaux": MarketauxProvider,
         "rss": RssNewsProvider,
         "symbol_universe": SymbolUniverseProvider,
+        "china_hk_symbol_index": ChinaHkSymbolProvider,
         "finance_database": FinanceDatabaseProvider,
         "akshare": AkShareProvider,
         "gleif": GleifProvider,
@@ -1203,12 +1347,13 @@ def parse_symbol_universe_records(
         if not symbol and not name:
             continue
         aliases = _symbol_universe_aliases(symbol, name, _clean(row.get("aliases_json")))
-        score = max(
-            [
-                *[fuzzy_score(term, symbol) for term in query_terms],
-                *[fuzzy_score(term, name) for term in query_terms],
-                *[fuzzy_score(term, alias) for term in query_terms for alias in aliases],
-            ]
+        normalized_symbol = _normalize_symbol_for_index(symbol)
+        exact_symbol = any(_normalize_symbol_for_index(term) == normalized_symbol for term in query_terms)
+        candidate_terms = tuple(dict.fromkeys((symbol, name, *aliases)))[:8]
+        score = 100 if exact_symbol else max(
+            shortlist_fuzzy_score(term, candidate)
+            for term in tuple(query_terms)[:8]
+            for candidate in candidate_terms
         )
         if score < 55:
             continue
@@ -1453,6 +1598,54 @@ def parse_akshare_records(rows: list[dict[str, Any]], query: str, *, market: str
     return sorted(results, key=lambda item: item.match_score, reverse=True)
 
 
+def _china_hk_result(
+    raw: dict[str, Any], query: str, meta: ProviderMeta, metadata: dict[str, str]
+) -> CompanyResult:
+    symbol = _clean(raw.get("symbol"))
+    display_name = _clean(raw.get("chinese_name")) or _clean(raw.get("name"))
+    aliases = [
+        item
+        for item in {
+            display_name,
+            _clean(raw.get("english_name")),
+            _clean(raw.get("short_name")),
+            _clean(raw.get("long_name")),
+            symbol,
+            symbol[2:] if len(symbol) > 2 else "",
+        }
+        if item
+    ]
+    exact_symbol = normalize_china_hk_symbol(query, _clean(raw.get("market"))) == symbol
+    seed_match = seed_alias_exact_match({query}, set(aliases))
+    score = 100 if exact_symbol else max(93 if seed_match else 0, max([fuzzy_score(query, item) for item in aliases] or [0]))
+    reason = "股票代码精确匹配" if exact_symbol else ("常用名称或简称匹配" if seed_match else "公司名称相似")
+    return CompanyResult(
+        id=str(raw.get("id") or ""),
+        name=display_name,
+        display_name=display_name,
+        legal_name=_clean(raw.get("long_name")),
+        symbol=symbol,
+        exchange=_clean(raw.get("exchange")),
+        market=_clean(raw.get("market")),
+        country=_clean(raw.get("country")),
+        category="listed_company",
+        aliases=aliases,
+        provider=meta.display_name,
+        provider_id=meta.provider_id,
+        source_url="https://github.com/akfamily/akshare",
+        match_score=score,
+        match_reason=reason,
+        updated_at=_clean(raw.get("generated_at")) or metadata.get("generated_at", ""),
+        raw={
+            **raw,
+            "provider_sources": [meta.provider_id],
+            "provider_category": "bundled_open_source_index",
+            "from_local_index": True,
+            "is_realtime": False,
+        },
+    )
+
+
 def parse_gleif_records(data: Any, query: str) -> list[CompanyResult]:
     rows = data.get("data", []) if isinstance(data, dict) else []
     results = []
@@ -1489,6 +1682,21 @@ def parse_gleif_records(data: Any, query: str) -> list[CompanyResult]:
             )
         )
     return results
+
+
+def _akshare_profile_dict(dataset: Any) -> dict[str, Any]:
+    rows = _records_from_symbol_dataset(dataset)
+    result: dict[str, Any] = {}
+    for row in rows:
+        key = _clean(_first_present(row, "item", "项目", "字段", "key"))
+        value = _first_present(row, "value", "值", "内容")
+        if key:
+            result[key] = value
+        else:
+            for name, candidate in row.items():
+                if _clean(candidate):
+                    result[str(name)] = candidate
+    return result
 
 
 def parse_wikidata_search(data: Any, query: str) -> list[CompanyResult]:

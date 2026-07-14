@@ -32,6 +32,19 @@ class ProviderRegistry:
 def _providers() -> list[ProviderMeta]:
     return [
         ProviderMeta(
+            "china_hk_symbol_index",
+            "中国及港股公开数据",
+            "symbol_universe",
+            "Bundled A-share and Hong Kong security master index",
+            "中文名称、简称、A股和港股代码离线搜索；不是实时行情源。",
+            False,
+            None,
+            "Bundled open-source index",
+            "https://github.com/akfamily/akshare",
+            True,
+            notes="随安装包分发，无需 API key；运行时 AKShare 补全为 experimental。",
+        ),
+        ProviderMeta(
             "symbol_universe",
             "内置开源证券索引",
             "symbol_universe",
@@ -60,16 +73,16 @@ def _providers() -> list[ProviderMeta]:
         ),
         ProviderMeta(
             "akshare",
-            "AKShare Experimental China/HK",
+            "中国及港股公开数据（运行时补充）",
             "experimental",
             "China A-share and Hong Kong public lists",
             "Experimental no-key Chinese symbol/name search where public interfaces are available",
             False,
             None,
-            "Open-source optional dependency",
+            "Bundled open-source dependency",
             "https://github.com/akfamily/akshare",
             True,
-            notes="Experimental no-key provider; public endpoints may change or fail. No login, cookie, token, or anti-bot bypass.",
+            notes="Bundled experimental no-key provider; lazy-loaded only for detail enrichment. No login, cookie, token, or anti-bot bypass.",
         ),
         ProviderMeta(
             "gleif",

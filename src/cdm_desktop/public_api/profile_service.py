@@ -26,7 +26,7 @@ from cdm_desktop.public_api.registry import ProviderRegistry
 from cdm_desktop.public_api.search_service import PublicSearchService
 from cdm_desktop.public_api.settings_store import PublicApiSettingsStore
 
-PROFILE_SCHEMA_VERSION = 4
+PROFILE_SCHEMA_VERSION = 5
 PROFILE_CACHE_TTL_SECONDS = 21600
 
 
@@ -42,12 +42,14 @@ class CompanyProfileService:
     def get_immediate_profile(self, company: CompanyResult) -> CompanyProfile:
         """Return search-result and bundled-index fields without a network request."""
         base = _profile_from_company(company)
-        meta = self._meta("symbol_universe")
-        if not meta or not company.symbol:
-            return base
-        provider = provider_for(meta, self.key_store, self.http, self.cache)
-        local, _error = provider.profile(company)
-        return _merge_profiles(company, [base, local] if local else [base])
+        profiles: list[CompanyProfile | None] = [base]
+        if company.symbol:
+            for provider_id in ("china_hk_symbol_index", "symbol_universe"):
+                meta = self._meta(provider_id)
+                if meta:
+                    local, _error = provider_for(meta, self.key_store, self.http, self.cache).profile(company)
+                    profiles.append(local)
+        return _merge_profiles(company, profiles)
 
     def get_profile(self, company: CompanyResult) -> tuple[CompanyProfile | None, list[ProviderStatus]]:
         key = self._profile_cache_key(company)
@@ -69,7 +71,11 @@ class CompanyProfileService:
                 "已加载本地基础资料。",
             )
         ]
-        provider_ids = [item for item in self._provider_order(company) if item != "symbol_universe"]
+        provider_ids = [
+            item
+            for item in self._provider_order(company)
+            if item not in {"symbol_universe", "china_hk_symbol_index"}
+        ]
         with ThreadPoolExecutor(max_workers=min(3, max(1, len(provider_ids)))) as pool:
             futures = {}
             for provider_id in provider_ids:
@@ -137,7 +143,7 @@ class CompanyProfileService:
         return provider_for(meta, self.key_store, self.http, self.cache).profile(company)
 
     def _provider_order(self, company: CompanyResult) -> list[str]:
-        order = ["symbol_universe"]
+        order = ["china_hk_symbol_index", "symbol_universe"]
         market_text = " ".join([company.market, company.exchange, company.country, company.symbol]).upper()
         if any(marker in market_text for marker in ("CN", "CHINA", "SH", "SZ", "HK", "HONG KONG")):
             order.append("akshare")
@@ -233,8 +239,9 @@ FIELD_PRIORITY: dict[str, tuple[str, ...]] = {
     "market_cap": ("fmp", "alpha_vantage", "akshare"),
     "description": ("official_website_evidence", "akshare", "wikidata", "fmp", "alpha_vantage"),
     "website": ("official_website_evidence", "akshare", "wikidata", "fmp", "alpha_vantage"),
-    "sector": ("akshare", "symbol_universe", "fmp", "alpha_vantage", "wikidata"),
-    "industry": ("akshare", "symbol_universe", "fmp", "alpha_vantage", "wikidata"),
+    "sector": ("akshare", "china_hk_symbol_index", "symbol_universe", "fmp", "alpha_vantage", "wikidata"),
+    "industry": ("akshare", "china_hk_symbol_index", "symbol_universe", "fmp", "alpha_vantage", "wikidata"),
+    "listing_date": ("akshare", "china_hk_symbol_index"),
     "legal_name": ("official_registry", "gleif", "official_website_evidence", "symbol_universe", "wikidata"),
     "lei": ("gleif",),
     "jurisdiction": ("official_registry", "gleif"),
@@ -245,6 +252,7 @@ PROFILE_PRIORITY = {
     "official_registry": 100,
     "official_website_evidence": 95,
     "akshare": 90,
+    "china_hk_symbol_index": 88,
     "symbol_universe": 86,
     "fmp": 82,
     "alpha_vantage": 78,

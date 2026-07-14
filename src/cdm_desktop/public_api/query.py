@@ -64,10 +64,10 @@ COMPANY_SUFFIXES = [
 
 QueryKind = Literal["empty", "lei", "hk_symbol", "cn_symbol", "us_symbol", "symbol", "name"]
 
-PREFIX_PATTERN = re.compile(r"^(NASDAQ|NYSE|AMEX|HK|SH|SZ)[:.\-\s]*([A-Z0-9.\-]+)$", re.IGNORECASE)
+PREFIX_PATTERN = re.compile(r"^(NASDAQ|NYSE|AMEX|HK|SH|SZ|BJ)[:.\-\s]*([A-Z0-9.\-]+)$", re.IGNORECASE)
 LEI_PATTERN = re.compile(r"^[A-Z0-9]{20}$")
 HK_SYMBOL_PATTERN = re.compile(r"^(?:HK)?0*\d{1,5}$", re.IGNORECASE)
-CN_SYMBOL_PATTERN = re.compile(r"^(?:(SH|SZ))?(\d{6})$", re.IGNORECASE)
+CN_SYMBOL_PATTERN = re.compile(r"^(?:(SH|SZ|BJ))?(\d{6})$", re.IGNORECASE)
 US_SYMBOL_PATTERN = re.compile(r"^[A-Z]{1,6}(?:[.\-][A-Z])?$", re.IGNORECASE)
 
 
@@ -136,6 +136,25 @@ def fuzzy_score(query: str, candidate: str) -> int:
     return int(SequenceMatcher(None, q, c).ratio() * 100)
 
 
+def shortlist_fuzzy_score(query: str, candidate: str) -> int:
+    """Fast reranking score for candidates already selected by SQLite."""
+    q = normalize_query(query)
+    c = normalize_query(candidate)
+    if not q or not c:
+        return 0
+    if q == c:
+        return 100
+    if c.startswith(q) or q.startswith(c):
+        return 86
+    if acronym(candidate).casefold() == q.casefold():
+        return 90
+    if rapidfuzz_fuzz is not None:
+        if _is_short_cjk(q) or _is_short_cjk(c):
+            return int(rapidfuzz_fuzz.ratio(q, c))
+        return int(rapidfuzz_fuzz.WRatio(q, c))
+    return int(SequenceMatcher(None, q, c).ratio() * 100)
+
+
 def analyze_query(value: str) -> QueryInfo:
     original = value or ""
     normalized = normalize_query(original)
@@ -163,7 +182,7 @@ def analyze_query(value: str) -> QueryInfo:
         kind = "hk_symbol"
     elif CN_SYMBOL_PATTERN.match(upper):
         symbol = normalize_cn_symbol(upper)
-        market_hint = symbol[:2] if symbol[:2] in {"SH", "SZ"} else _cn_prefix(symbol)
+        market_hint = symbol[:2] if symbol[:2] in {"SH", "SZ", "BJ"} else _cn_prefix(symbol)
         kind = "cn_symbol"
     elif US_SYMBOL_PATTERN.match(upper):
         symbol = upper.replace("-", ".")
@@ -176,7 +195,7 @@ def analyze_query(value: str) -> QueryInfo:
         if symbol.startswith("HK"):
             base_terms.add(symbol[2:])
             base_terms.add(symbol[2:].lstrip("0") or symbol[2:])
-        if symbol.startswith(("SH", "SZ")):
+        if symbol.startswith(("SH", "SZ", "BJ")):
             base_terms.add(symbol[2:])
         if "." in symbol:
             base_terms.add(symbol.replace(".", "-"))
@@ -185,7 +204,7 @@ def analyze_query(value: str) -> QueryInfo:
     if upper.isdigit():
         for candidate in numeric_symbol_candidates(upper):
             base_terms.add(candidate)
-            if candidate.startswith(("HK", "SH", "SZ")):
+            if candidate.startswith(("HK", "SH", "SZ", "BJ")):
                 base_terms.add(candidate[2:])
     variants = tuple(expand_query_aliases({term for term in base_terms if term}, max_terms=16))
     return QueryInfo(
@@ -245,7 +264,7 @@ def numeric_symbol_candidates(value: str, *, prefer_market: str = "") -> list[st
 def _normalize_prefixed_symbol(prefix: str, body: str) -> str:
     if prefix == "HK":
         return normalize_hk_symbol(f"HK{body}")
-    if prefix in {"SH", "SZ"}:
+    if prefix in {"SH", "SZ", "BJ"}:
         return normalize_cn_symbol(f"{prefix}{body}")
     return body.replace("-", ".").upper()
 
@@ -253,7 +272,7 @@ def _normalize_prefixed_symbol(prefix: str, body: str) -> str:
 def _kind_for_symbol(symbol: str, prefix: str) -> QueryKind:
     if prefix == "HK" or symbol.startswith("HK"):
         return "hk_symbol"
-    if prefix in {"SH", "SZ"} or symbol.startswith(("SH", "SZ")):
+    if prefix in {"SH", "SZ", "BJ"} or symbol.startswith(("SH", "SZ", "BJ")):
         return "cn_symbol"
     if LEI_PATTERN.match(symbol):
         return "lei"
@@ -264,8 +283,10 @@ def _cn_prefix(digits_or_symbol: str) -> str:
     digits = re.sub(r"\D", "", digits_or_symbol)
     if digits.startswith("6"):
         return "SH"
-    if digits.startswith(("0", "3")):
+    if digits.startswith(("0", "2", "3")):
         return "SZ"
+    if digits.startswith(("4", "8", "9")):
+        return "BJ"
     return "CN"
 
 

@@ -99,7 +99,7 @@ def _report(mode: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     passed = sum(1 for row in rows if row["passed"])
     failed = total - passed
     return {
-        "version": "v0.1.3",
+        "version": "v0.1.4-generalized-search-performance-rc1",
         "app_mode": "Open-Source Data Mode",
         "mode": mode,
         "open_source_provider_availability": _open_source_provider_availability(),

@@ -109,6 +109,14 @@ class SearchPage(QWidget):
         self.layout.addLayout(self.side_host)
         self._show_initial_state()
         self.layout.addStretch()
+        QTimer.singleShot(0, self._warmup_local_indexes)
+
+    def _warmup_local_indexes(self) -> None:
+        if not self._accepting_searches:
+            return
+        warmup = getattr(self.service, "warmup_local_indexes", None)
+        if callable(warmup):
+            self.thread_pool.start(FunctionWorker(warmup))
 
     def set_query(self, keyword: str) -> None:
         self.input.setText(keyword)
@@ -395,7 +403,7 @@ class SearchPage(QWidget):
     def _company_card(self, company: CompanyResult) -> QWidget:
         identity = company.symbol or company.lei or company.company_number or company.registry_number or "暂无标识"
         region = company.exchange or company.market or company.jurisdiction or company.country or "暂无地区"
-        source = "本地索引" if company.provider_id == "symbol_universe" or company.raw.get("from_local_index") else "公开来源"
+        source = "本地索引" if company.provider_id in {"symbol_universe", "china_hk_symbol_index"} or company.raw.get("from_local_index") else "公开来源"
         row = ListRow(
             company.name or company.display_name or company.legal_name or identity,
             f"{identity} · {region}",

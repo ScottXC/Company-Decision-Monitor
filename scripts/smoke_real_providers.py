@@ -100,7 +100,7 @@ def main() -> int:
         _run_provider_checks(provider_id, provider, results, masked)
 
     report = {
-        "version": "v0.1.3",
+        "version": "v0.1.4-generalized-search-performance-rc1",
         "mode": "Open-Source Data Mode",
         "search_samples": SEARCH_SAMPLES,
         "results": results,

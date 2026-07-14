@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -34,14 +35,21 @@ def _self_test_sqlite() -> int:
             objects = {
                 str(row[0]): str(row[1])
                 for row in index.execute(
-                    "SELECT name, type FROM sqlite_master WHERE name IN (?, ?, ?, ?)",
-                    ("symbols", "aliases", "symbols_fts", "symbol_universe"),
+                    "SELECT name, type FROM sqlite_master WHERE name IN (?, ?, ?, ?, ?)",
+                    ("symbols", "aliases", "symbols_fts", "name_ngrams", "symbol_universe"),
                 )
             }
             if objects.get("symbols") != "table" or objects.get("aliases") != "table":
                 raise RuntimeError("bundled symbol index is missing symbols or aliases")
             if "symbols_fts" not in objects and objects.get("symbol_universe") != "view":
                 raise RuntimeError("bundled symbol index is missing FTS5 table or compatibility view")
+            if objects.get("name_ngrams") != "table":
+                raise RuntimeError("bundled symbol index is missing the n-gram candidate index")
+            schema_row = index.execute(
+                "SELECT value FROM metadata WHERE key='schema_version' LIMIT 1"
+            ).fetchone()
+            if not schema_row or str(schema_row[0]).strip('"') != "2":
+                raise RuntimeError("bundled symbol index schema version is incompatible")
 
             exact = index.execute(
                 "SELECT symbol FROM symbols WHERE normalized_symbol = ? LIMIT 1", ("AAPL",)
@@ -67,6 +75,11 @@ def _self_test_sqlite() -> int:
                 ).fetchone()
                 if not fts:
                     raise RuntimeError("bundled symbol index FTS query failed")
+            ngram = index.execute(
+                "SELECT symbol_id FROM name_ngrams WHERE gram = ? LIMIT 1", ("app",)
+            ).fetchone()
+            if not ngram:
+                raise RuntimeError("bundled symbol index n-gram query failed")
         finally:
             index.close()
     except Exception as exc:
@@ -77,7 +90,7 @@ def _self_test_sqlite() -> int:
     print(
         "SQLite self-test passed: "
         f"stdlib={sqlite3.sqlite_version}, runtime={runtime_version}, extension={extension_path}, "
-        f"fts5=ok, index=ok, index_path={index_path}"
+        f"fts5=ok, ngram=ok, index=ok, index_path={index_path}"
     )
     return 0
 
@@ -92,10 +105,44 @@ def _bundled_symbol_index_path() -> Path:
     return package_path
 
 
+def _self_test_akshare() -> int:
+    try:
+        import akshare as ak
+
+        required = (
+            "stock_info_sh_name_code",
+            "stock_info_sz_name_code",
+            "stock_hk_spot_em",
+            "stock_individual_info_em",
+            "stock_hk_company_profile_em",
+        )
+        missing = [name for name in required if not callable(getattr(ak, name, None))]
+        if missing:
+            raise RuntimeError(f"required functions missing: {', '.join(missing)}")
+        version = str(getattr(ak, "__version__", "unknown"))
+    except Exception as exc:
+        message = f"AKShare self-test failed: {type(exc).__name__}: {exc}"
+        _write_self_test_report(message)
+        print(message, file=sys.stderr)
+        return 1
+    message = f"AKShare self-test passed: version={version}, import=ok, functions=ok, network=not-used"
+    _write_self_test_report(message)
+    print(message)
+    return 0
+
+
+def _write_self_test_report(message: str) -> None:
+    report_path = os.environ.get("CDM_SELF_TEST_REPORT", "").strip()
+    if report_path:
+        Path(report_path).write_text(message, encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["--self-test", "sqlite"]:
         return _self_test_sqlite()
+    if args == ["--self-test", "akshare"]:
+        return _self_test_akshare()
 
     from cdm_desktop.app import create_qapplication
     from cdm_desktop.logging_config import configure_logging

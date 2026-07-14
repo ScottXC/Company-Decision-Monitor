@@ -323,7 +323,7 @@ def test_profile_cache_key_includes_schema(tmp_path: Path) -> None:
     key = service._profile_cache_key(company)
 
     assert key
-    assert PROFILE_SCHEMA_VERSION == 4
+    assert PROFILE_SCHEMA_VERSION == 5
 
 
 def test_old_empty_profile_cache_is_ignored_without_touching_watchlist(tmp_path: Path) -> None:

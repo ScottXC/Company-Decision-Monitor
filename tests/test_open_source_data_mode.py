@@ -33,7 +33,7 @@ def make_paths(tmp_path: Path) -> AppPaths:
 
 
 def test_open_source_data_mode_labels() -> None:
-    assert __version__ == "0.1.3"
+    assert __version__ == "0.1.4"
     assert APP_MODE_LABEL == "Open-Source Data Mode"
 
 

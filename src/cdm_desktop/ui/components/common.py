@@ -74,6 +74,8 @@ CATEGORY_LABELS = {
     "fallback": "补充来源",
     "external_link": "外部链接",
     "symbol_universe": "证券目录",
+    "china_hk_symbol_index": "中国及港股索引",
+    "akshare": "中国及港股公开数据",
     "experimental": "实验来源",
     "web_evidence": "网页证据",
 }

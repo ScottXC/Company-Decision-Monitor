@@ -10,6 +10,7 @@ from cdm_desktop.public_api.query import QueryInfo, acronym, fuzzy_score, remove
 from cdm_desktop.public_api.seed_aliases import matching_seed_aliases
 
 PROVIDER_AUTHORITY = {
+    "china_hk_symbol_index": 93,
     "symbol_universe": 91,
     "fmp": 96,
     "alpha_vantage": 94,
@@ -21,7 +22,7 @@ PROVIDER_AUTHORITY = {
     "wikidata": 64,
 }
 
-LISTED_PROVIDERS = {"symbol_universe", "fmp", "alpha_vantage", "nasdaq_directory"}
+LISTED_PROVIDERS = {"china_hk_symbol_index", "symbol_universe", "fmp", "alpha_vantage", "nasdaq_directory"}
 LEGAL_PROVIDERS = {"gleif", "opencorporates", "companies_house", "norway_brreg"}
 
 
@@ -45,11 +46,7 @@ def score_company(company: CompanyResult, query: QueryInfo) -> CompanyResult:
     score = max(company.match_score, 0)
     reason = company.match_reason or "provider match"
 
-    candidate_symbols = {
-        symbol
-        for symbol in {_normalize_symbol(company.symbol), *(_normalize_symbol(alias) for alias in company.aliases)}
-        if symbol
-    }
+    candidate_symbols = {_normalize_symbol(company.symbol)} - {""}
     direct_symbol_terms = {query.original, query.upper, query.symbol} if query.kind != "name" else set()
     query_symbols = {symbol for symbol in (_normalize_symbol(term) for term in direct_symbol_terms) if symbol}
     seed_matches = matching_seed_aliases({query.original, query.normalized, query.normalized_no_suffix})
@@ -204,10 +201,11 @@ def _provider_sources(company: CompanyResult) -> set[str]:
     return {company.provider_id} if company.provider_id else set()
 
 
-def _sort_tuple(company: CompanyResult) -> tuple[int, int, int]:
+def _sort_tuple(company: CompanyResult) -> tuple[int, int, int, int]:
+    exact_symbol = 1 if company.match_reason == "代码完全匹配" else 0
     listed_bonus = 1 if _is_listed(company) else 0
     authority = PROVIDER_AUTHORITY.get(company.provider_id, 50)
-    return company.match_score, listed_bonus, authority
+    return exact_symbol, company.match_score, listed_bonus, authority
 
 
 def _is_listed(company: CompanyResult) -> bool:

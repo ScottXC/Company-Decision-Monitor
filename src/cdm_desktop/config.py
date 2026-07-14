@@ -7,9 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CDM_", extra="ignore")
 
-    app_version: str = "0.1.3"
+    app_version: str = "0.1.4-generalized-search-performance-rc1"
     app_mode: str = "Open-Source Data Mode"
-    app_user_agent: str = "CompanyDecisionMonitor/0.1.3"
+    app_user_agent: str = "CompanyDecisionMonitor/0.1.4"
     request_timeout_seconds: int = Field(default=15, ge=1, le=120)
     cache_ttl_seconds: int = Field(default=900, ge=60, le=86400)
     network_retry_count: int = Field(default=2, ge=0, le=5)

@@ -107,7 +107,11 @@ class DashboardPage(QWidget):
         layout = QHBoxLayout(host)
         layout.setContentsMargins(0, 4, 0, 0)
         statuses = self.search_service.provider_statuses()
-        local_ok = any(item.provider_id == "symbol_universe" and item.state in {"enabled", "empty"} for item in statuses)
+        local_ok = any(
+            item.provider_id in {"symbol_universe", "china_hk_symbol_index"}
+            and item.state in {"enabled", "empty"}
+            for item in statuses
+        )
         layout.addWidget(StatusBadge("本地索引可用" if local_ok else "本地索引需检查", "success" if local_ok else "warning"))
         layout.addWidget(StatusBadge("公开数据按需补充", "neutral"))
         layout.addWidget(StatusBadge("缓存已启用", "neutral"))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -157,22 +158,46 @@ def _write_sqlite(path: Path, rows: list[dict[str, Any]], generated_at: str, pac
         conn.execute("CREATE INDEX idx_aliases_symbol_id ON aliases(symbol_id)")
         try:
             conn.execute(
-                "CREATE VIRTUAL TABLE symbols_fts USING fts5(symbol, name, aliases, tokenize='unicode61')"
+                "CREATE VIRTUAL TABLE symbols_fts USING fts5("
+                "symbol, name, normalized_name, aliases, exchange, country, "
+                "tokenize='unicode61', prefix='2 3 4')"
             )
             fts_rows = [
                 (
                     str(row.get("symbol") or ""),
                     str(row.get("name") or ""),
+                    str(row.get("normalized_name") or ""),
                     " ".join(_decode_aliases(row.get("aliases_json"))),
+                    str(row.get("exchange") or ""),
+                    str(row.get("country") or ""),
                 )
                 for row in rows
             ]
-            conn.executemany("INSERT INTO symbols_fts(symbol, name, aliases) VALUES (?, ?, ?)", fts_rows)
+            conn.executemany(
+                "INSERT INTO symbols_fts(symbol,name,normalized_name,aliases,exchange,country) "
+                "VALUES (?,?,?,?,?,?)",
+                fts_rows,
+            )
         except sqlite3.OperationalError:
             # FTS5 is an optimization only; indexed exact/prefix search remains available.
             pass
+        conn.execute(
+            "CREATE TABLE name_ngrams (gram TEXT NOT NULL, symbol_id INTEGER NOT NULL, "
+            "field_type TEXT NOT NULL, position INTEGER NOT NULL, confidence INTEGER NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO name_ngrams(gram,symbol_id,field_type,position,confidence) VALUES (?,?,?,?,?)",
+            (
+                (gram, symbol_id, "name", position, 95)
+                for symbol_id, row in enumerate(rows, start=1)
+                for gram, position in _name_ngrams(str(row.get("normalized_name") or ""))
+            ),
+        )
+        conn.execute("CREATE INDEX idx_name_ngrams_gram ON name_ngrams(gram)")
+        conn.execute("CREATE INDEX idx_name_ngrams_symbol_id ON name_ngrams(symbol_id)")
         conn.execute("CREATE VIEW symbol_universe AS SELECT * FROM symbols")
         metadata_payload = {
+            "schema_version": 2,
             "source": "FinanceDatabase",
             "generated_at": generated_at,
             "record_count": len(rows),
@@ -214,6 +239,22 @@ def _normalize_name(value: str) -> str:
     except Exception:  # noqa: BLE001
         cleaned = value
     return " ".join(cleaned.casefold().replace(",", " ").split())
+
+
+def _name_ngrams(value: str) -> list[tuple[str, int]]:
+    compact = re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", value.casefold())
+    if not compact:
+        return []
+    sizes = (2, 3) if re.search(r"[\u3400-\u9fff]", compact) else (3,)
+    result: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for size in sizes:
+        for position in range(max(0, len(compact) - size + 1)):
+            gram = compact[position : position + size]
+            if gram not in seen:
+                seen.add(gram)
+                result.append((gram, position))
+    return result[:64]
 
 
 def _aliases(symbol: str, name: str) -> list[str]:

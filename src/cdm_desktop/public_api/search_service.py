@@ -27,12 +27,13 @@ from cdm_desktop.public_api.providers import provider_for
 from cdm_desktop.public_api.query import QueryInfo, analyze_query
 from cdm_desktop.public_api.ranking import group_companies, rank_and_dedupe_companies
 from cdm_desktop.public_api.registry import ProviderRegistry
+from cdm_desktop.public_api.search_query_plan import build_search_query_plan
 from cdm_desktop.public_api.settings_store import PublicApiSettingsStore
 
 SearchRegion = str
 SearchScope = str
 
-LOCAL_PROVIDER_IDS = {"symbol_universe", "nasdaq_directory"}
+LOCAL_PROVIDER_IDS = {"china_hk_symbol_index", "symbol_universe", "nasdaq_directory"}
 SEARCH_EXCLUDED_PROVIDER_IDS = {"rss", "marketaux", "xueqiu_external"}
 PUBLIC_ENRICHMENT_TIMEOUT_SECONDS = 3.0
 PUBLIC_ENRICHMENT_BUDGET_SECONDS = 5.0
@@ -41,6 +42,7 @@ MAX_BACKGROUND_PROVIDER_WORKERS = 3
 SLOW_SEARCH_MS = 1000.0
 LOCAL_CACHE_MAX_ITEMS = 160
 LOCAL_CACHE_TTL_SECONDS = 1800.0
+LOCAL_STAGE_BUDGET_SECONDS = 0.3
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ REGION_OPTIONS: tuple[tuple[SearchRegion, str, str], ...] = (
 
 REGION_PROVIDER_PRIORITY: dict[SearchRegion, tuple[str, ...]] = {
     "all": (
+        "china_hk_symbol_index",
         "symbol_universe",
         "nasdaq_directory",
         "akshare",
@@ -68,8 +71,8 @@ REGION_PROVIDER_PRIORITY: dict[SearchRegion, tuple[str, ...]] = {
         "xueqiu_external",
     ),
     "us": ("symbol_universe", "nasdaq_directory", "wikidata", "gleif", "rss", "xueqiu_external"),
-    "cn": ("symbol_universe", "akshare", "wikidata", "gleif", "rss", "xueqiu_external"),
-    "hk": ("symbol_universe", "akshare", "wikidata", "gleif", "rss", "xueqiu_external"),
+    "cn": ("china_hk_symbol_index", "symbol_universe", "akshare", "wikidata", "gleif", "rss", "xueqiu_external"),
+    "hk": ("china_hk_symbol_index", "symbol_universe", "akshare", "wikidata", "gleif", "rss", "xueqiu_external"),
     "uk": ("symbol_universe", "wikidata", "gleif", "rss", "xueqiu_external"),
     "eu": ("symbol_universe", "wikidata", "gleif", "rss", "xueqiu_external"),
     "no": ("symbol_universe", "norway_brreg", "wikidata", "gleif", "rss", "xueqiu_external"),
@@ -119,6 +122,9 @@ class PublicSearchService:
         region_filter: SearchRegion = "all",
         scope_filter: SearchScope = "all",
         cancel_check: Callable[[], bool] | None = None,
+        bypass_query_cache: bool = False,
+        bypass_result_cache: bool = False,
+        diagnostics_mode: bool = False,
     ) -> SearchResponse:
         local = self.search_local(
             query,
@@ -127,6 +133,8 @@ class PublicSearchService:
             region_filter=region_filter,
             scope_filter=scope_filter,
             cancel_check=cancel_check,
+            bypass_query_cache=bypass_query_cache,
+            diagnostics_mode=diagnostics_mode,
         )
         return self.enrich_search(
             query,
@@ -136,6 +144,8 @@ class PublicSearchService:
             region_filter=region_filter,
             scope_filter=scope_filter,
             cancel_check=cancel_check,
+            bypass_result_cache=bypass_result_cache,
+            diagnostics_mode=diagnostics_mode,
         )
 
     def search_local(
@@ -147,6 +157,8 @@ class PublicSearchService:
         region_filter: SearchRegion = "all",
         scope_filter: SearchScope = "all",
         cancel_check: Callable[[], bool] | None = None,
+        bypass_query_cache: bool = False,
+        diagnostics_mode: bool = False,
     ) -> SearchResponse:
         started = time.perf_counter()
         normalize_started = time.perf_counter()
@@ -162,7 +174,7 @@ class PublicSearchService:
             return SearchResponse(query=query, companies=[], news=[], statuses=[], timing=timing)
 
         memory_key = self._local_cache_key(query_info, limit, region_filter, scope_filter)
-        if use_cache and (cached := self._get_local_cache(memory_key)) is not None:
+        if use_cache and not bypass_query_cache and (cached := self._get_local_cache(memory_key)) is not None:
             cached.timing = SearchTiming(
                 query=query_info.original.strip(),
                 total_ms=(time.perf_counter() - started) * 1000,
@@ -177,6 +189,9 @@ class PublicSearchService:
             for meta in self._selected_providers(region_filter, scope_filter)
             if meta.provider_id in LOCAL_PROVIDER_IDS
         ]
+        query_plan = build_search_query_plan(query_info)
+        if query_plan.scripts == ("latin",) and query_info.kind not in {"cn_symbol", "hk_symbol"}:
+            local_metas = [meta for meta in local_metas if meta.provider_id != "china_hk_symbol_index"]
         companies: list[CompanyResult] = []
         statuses = [
             ProviderStatus(
@@ -189,8 +204,30 @@ class PublicSearchService:
         ]
         local_started = time.perf_counter()
         for meta in local_metas:
+            if time.perf_counter() - local_started >= LOCAL_STAGE_BUDGET_SECONDS:
+                statuses.append(
+                    ProviderStatus(
+                        "local_search_budget",
+                        "本地搜索预算",
+                        "fallback",
+                        "partial",
+                        "已先返回当前本地候选，正在补充公开来源。",
+                    )
+                )
+                break
             if _is_cancelled(cancel_check):
                 return _cancelled_local_response(query_info, statuses, timing, started)
+            if meta.provider_id == "nasdaq_directory" and companies:
+                statuses.append(
+                    ProviderStatus(
+                        meta.provider_id,
+                        meta.display_name,
+                        meta.category,
+                        "enabled",
+                        "内置证券索引已有匹配，已跳过较慢的本地目录兼容查询。",
+                    )
+                )
+                continue
             provider_started = time.perf_counter()
             provider = self._provider(meta, enrichment=False)
             if meta.provider_id == "nasdaq_directory" and hasattr(provider, "search_cached"):
@@ -199,12 +236,13 @@ class PublicSearchService:
                 rows, _news, error = provider.search(query_info.original, limit=limit)  # type: ignore[attr-defined]
             provider_ms = (time.perf_counter() - provider_started) * 1000
             timing.provider_timings[meta.provider_id] = provider_ms
-            if meta.provider_id == "symbol_universe":
-                timing.local_index_ms = provider_ms
+            if meta.provider_id in {"symbol_universe", "china_hk_symbol_index"}:
+                timing.local_index_ms += provider_ms
                 provider_timing = getattr(provider, "last_timing", {})
-                timing.fuzzy_ms = float(provider_timing.get("fuzzy_ms", 0.0))
-                timing.candidate_shortlist_size = int(provider_timing.get("shortlist_size", 0))
-                timing.fuzzy_candidate_count = int(provider_timing.get("shortlist_size", 0))
+                timing.fuzzy_ms += float(provider_timing.get("fuzzy_ms", 0.0))
+                shortlist_size = int(provider_timing.get("shortlist_size", 0))
+                timing.candidate_shortlist_size += shortlist_size
+                timing.fuzzy_candidate_count += shortlist_size
             companies.extend(rows)
             if _is_cancelled(cancel_check):
                 return _cancelled_local_response(query_info, statuses, timing, started)
@@ -232,7 +270,8 @@ class PublicSearchService:
             grouped_results=group_companies(ranked),
             timing=timing,
         )
-        self._put_local_cache(memory_key, response)
+        if not bypass_query_cache:
+            self._put_local_cache(memory_key, response)
         self._log_timing(timing, stage="local")
         return response
 
@@ -246,6 +285,8 @@ class PublicSearchService:
         region_filter: SearchRegion = "all",
         scope_filter: SearchScope = "all",
         cancel_check: Callable[[], bool] | None = None,
+        bypass_result_cache: bool = False,
+        diagnostics_mode: bool = False,
     ) -> SearchResponse:
         started = time.perf_counter()
         query_info = analyze_query(query)
@@ -269,7 +310,7 @@ class PublicSearchService:
             },
             query_info.normalized,
         )
-        if use_cache:
+        if use_cache and not bypass_result_cache:
             cached = self.cache.get(key)
             if isinstance(cached, dict):
                 if _is_cancelled(cancel_check):
@@ -383,10 +424,24 @@ class PublicSearchService:
             errors=errors,
             timing=timing,
         )
-        self.cache.set(key, _response_to_cache(enrichment), ttl_seconds=21600)
+        if not bypass_result_cache:
+            self.cache.set(key, _response_to_cache(enrichment), ttl_seconds=21600)
         merged = _merge_search_responses(base_response, enrichment, query_info, limit)
         self._log_timing(timing, stage="enrichment")
         return merged
+
+    def clear_query_cache(self) -> None:
+        with self._cache_lock:
+            self._local_cache.clear()
+
+    def warmup_local_indexes(self) -> None:
+        for meta in self._selected_providers("all", "all"):
+            if meta.provider_id not in {"symbol_universe", "china_hk_symbol_index"}:
+                continue
+            provider = self._provider(meta, enrichment=False)
+            manager = getattr(provider, "index_manager", None)
+            if manager is not None:
+                manager.warmup()
 
     def _search_enrichment_provider(
         self,

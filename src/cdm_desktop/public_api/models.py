@@ -16,6 +16,14 @@ ProviderCategory = Literal[
     "web_evidence",
 ]
 ProviderState = Literal[
+    "available",
+    "loading",
+    "healthy",
+    "degraded",
+    "unavailable",
+    "dependency_error",
+    "source_changed",
+    "timeout",
     "enabled",
     "not_configured",
     "disabled",
