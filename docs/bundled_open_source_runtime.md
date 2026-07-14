@@ -33,6 +33,15 @@ The SQLite index contains only search metadata needed by the app:
 
 The installed app reads the bundled SQLite index through `SymbolUniverseProvider`. It does not import FinanceDatabase at normal runtime and does not treat the index as realtime market data or a financial database.
 
+The bundled snapshot uses schema version 2 and was generated at `2026-07-10T07:28:34.260828+00:00` from FinanceDatabase 2.4.0 equities metadata. Rebuild and validate it from the project environment with:
+
+```powershell
+python scripts\build_symbol_universe.py
+python scripts\validate_symbol_universe.py
+```
+
+The database records source, package version, license, generation time, field list, and record count in its `metadata` table. The snapshot is tracked with Git LFS because it exceeds GitHub's ordinary per-file Git limit.
+
 ## RapidFuzz
 
 RapidFuzz is bundled as a core runtime dependency. It improves:
@@ -51,7 +60,7 @@ cleanco is bundled as a core runtime dependency for English company-name cleanin
 
 ## AKShare
 
-AKShare remains optional and experimental. It is not required for the default search workflow and may report `dependency_missing` if not present. This avoids increasing package risk and avoids depending on unstable public interfaces for the main user path. Because AKShare is not bundled in this release, its upstream license should be rechecked before any future bundled distribution decision.
+Starting with `v0.1.4-open-source-data-expansion`, AKShare 1.18.64 is bundled as an experimental, lazy-loaded runtime dependency. The build-time China/HK index keeps master-list downloads out of the user search path. Runtime AKShare calls occur only for background company-detail enrichment and are isolated by timeout, cache, stale fallback, and provider errors. Its MIT license is included in `third_party/licenses/AKShare_LICENSE.txt`; PyInstaller also collects its required pandas, NumPy, curl_cffi and document-parser runtime dependencies.
 
 ## crawlergo
 
@@ -65,6 +74,7 @@ The package includes:
 - `third_party/licenses/RapidFuzz_LICENSE.txt`
 - `third_party/licenses/cleanco_LICENSE.txt`
 - `third_party/licenses/FinanceDatabase_LICENSE.txt`
+- `third_party/licenses/AKShare_LICENSE.txt`
 
 ## PyInstaller Data Files
 

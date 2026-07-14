@@ -3,23 +3,45 @@
 <details open>
 <summary><strong>English</strong></summary>
 
-Current version: `v0.1.3`
+Current version: `v0.1.4-generalized-search-performance-rc1`
 
 Current mode: `Open-Source Data Mode`
 
-Release type: `Stable Release`
+Release type: `Release Candidate`
 
 Company Decision Monitor is a Windows desktop application for company research and corporate activity monitoring. In `Open-Source Data Mode`, normal users do not need to apply for API keys, install Python, run `pip install`, download open-source projects, or import local company files. The installer bundles the runtime dependencies and a generated open-source symbol index for company search, symbol metadata, entity fallback, RSS news fallback, and local watchlist refresh.
 
 The application does not provide investment advice, trading features, buy/sell/order workflows, portfolio P&L, target prices, or return forecasts.
 
+## v0.1.4 generalized search performance
+
+Local search performance is now measured with a 450-case holdout set sampled from the bundled indexes, excluding seed aliases and the fixed regression examples. The runtime uses a process-level immutable SQLite index manager, indexed exact and prefix lookups, FTS5 prefix search, and an explicit Chinese/name n-gram candidate index. RapidFuzz only reranks a bounded SQL shortlist; production search no longer falls back to a leading-wildcard `LIKE` scan.
+
+Known regression cases and unseen holdout cases are reported separately. Benchmarks use temporary AppData and cache directories and can explicitly bypass memory and result caches:
+
+```powershell
+python scripts\benchmark_search.py
+python scripts\benchmark_unseen_search.py
+python scripts\check_search_query_plans.py
+```
+
+Application startup may warm index schema and metadata in a background worker, but it never pre-searches named companies or writes benchmark results into production caches. Public providers still start only after local results are available.
+
+## v0.1.4 China and Hong Kong data
+
+AKShare 1.18.64 and its required runtime dependencies are included in the Windows build. Ordinary users do not need Python, `pip install`, an API key, or a separate AKShare installation. A bundled China/Hong Kong SQLite index provides fast offline A-share and Hong Kong ticker, Chinese name, short-name and alias search. Runtime AKShare enrichment is lazy-loaded only after company details are opened.
+
+The provider is experimental because its public upstream pages can change. The index is point-in-time security master data, not a realtime quote database. Price, market capitalization, listing date, industry, description, legal information and news remain hidden when no reliable public source returns them. Missing fields are never replaced with fabricated values.
+
+Xueqiu remains an external browser link only. The application does not request Xueqiu content and does not use cookies, tokens, private APIs, caching, indexing, or article-body scraping.
+
 ## v0.1.3 Company Data Completeness
 
-This release includes the company-profile completeness work validated during the release-candidate cycle. It focuses on immediate local identity fields, asynchronous visible-detail refresh, confidence-gated Wikidata/GLEIF enrichment, field-level sources, entity-aware coverage, and profile cache schema handling. Public no-key sources are not equivalent to a commercial real-time database: live prices, market capitalization, news, and complete legal records can be absent. Missing fields are never fabricated. AKShare is not bundled in this release.
+The v0.1.3 release included the company-profile completeness work validated during its release-candidate cycle. Public no-key sources are not equivalent to a commercial real-time database: live prices, market capitalization, news, and complete legal records can be absent. Missing fields are never fabricated.
 
 ## Company profile enrichment
 
-Company details now load in stages. The bundled symbol index immediately supplies available security identity, exchange, market, country, currency, sector, industry, and instrument type fields. Wikidata and GLEIF then provide best-effort public entity and legal-entity enrichment in background workers; AKShare can add experimental China/Hong Kong metadata when the optional dependency and its public endpoints are available.
+Company details now load in stages. The bundled symbol index immediately supplies available security identity, exchange, market, country, currency, sector, industry, and instrument type fields. Wikidata and GLEIF then provide best-effort public entity and legal-entity enrichment in background workers; the bundled, lazy-loaded AKShare runtime can add experimental China/Hong Kong metadata when its public endpoints are available.
 
 Official website evidence remains user-triggered and robots-compliant. Missing fields are not replaced with fabricated values, zeroes, or generic placeholders. Price and market capitalization remain hidden when no reliable real-time source is enabled. The displayed profile-coverage percentage measures populated supported fields only; it is not an authority or accuracy score.
 
@@ -419,7 +441,7 @@ Please report bugs, provider problems, installation issues, and feature requests
 <details>
 <summary><strong>中文</strong></summary>
 
-当前版本：`v0.1.3`
+当前版本：`v0.1.4-generalized-search-performance-rc1`
 当前模式：`Open-Source Data Mode`
 
 Company Decision Monitor 是面向普通用户的公司研究与企业动态监控 Windows 桌面软件。当前版本默认不要求普通用户申请任何 API key，不要求安装 Python，不要求手动 `pip install`，也不要求导入 Excel、CSV 或本地公司数据库；安装包会内置运行依赖和开源 symbol universe 索引。
@@ -428,11 +450,11 @@ Company Decision Monitor 是面向普通用户的公司研究与企业动态监�
 
 ## v0.1.3 公司资料完整度
 
-本正式版包含经过发布候选验证的公司资料完整度改进，重点包括本地身份字段即时展示、异步资料回填后刷新可见详情、Wikidata/GLEIF 高置信补全、字段级来源、按实体类型计算完整度和 Profile 缓存 schema。公开无 key 来源不等同于商业实时数据库，价格、市值、新闻和完整法人资料可能缺失；系统不会伪造缺失字段。本版本不内置 AKShare。
+v0.1.3 正式版包含经过发布候选验证的公司资料完整度改进。当前 v0.1.4 开发版已内置 AKShare 1.18.64 和中国/港股本地证券索引，普通用户无需 Python、pip 或 API key。公开无 key 来源不等同于商业实时数据库，价格、市值、新闻和完整法人资料可能缺失；系统不会伪造缺失字段。
 
 ## 公司资料补全机制
 
-公司详情采用分阶段加载。内置证券索引会立即提供其真实包含的公司名称、代码、交易所、市场、国家、币种、板块、行业和证券类型；Wikidata 与 GLEIF 在后台补充公开实体和法人资料；AKShare 安装且公开接口可用时，可实验性补充中国 A 股和港股资料。
+公司详情采用分阶段加载。内置证券索引会立即提供其真实包含的公司名称、代码、交易所、市场、国家、币种、板块、行业和证券类型；Wikidata 与 GLEIF 在后台补充公开实体和法人资料；随安装包内置并延迟加载的 AKShare 在公开接口可用时，可实验性补充中国 A 股和港股资料。
 
 官网资料仍需用户主动触发，并遵守 robots.txt。没有可靠来源的字段不会使用假数据、0 或通用占位值补齐；没有可靠实时来源时，价格和市值会被隐藏。资料完整度只表示当前支持字段的填充比例，不代表权威性或准确性。
 

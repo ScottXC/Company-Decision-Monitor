@@ -12,7 +12,7 @@ Company details are loaded independently from ordinary search and news. Opening 
 
 - **Wikidata:** When no QID is available, the provider searches company names and aliases, scores candidates, and accepts only high-confidence matches. It can supplement labels, aliases, descriptions, website, ticker, inception date, QID, and Wikipedia URL. It is not a financial authority.
 - **GLEIF:** When no LEI is available, the provider searches a sufficiently specific legal/full company name. Country and jurisdiction improve candidate scores. Ambiguous candidates are not adopted. Accepted records can supply legal name, LEI, jurisdiction, entity/registration status, and legal address.
-- **AKShare:** Optional and experimental. For China/Hong Kong companies it can map public, no-login symbol-list fields and stable metadata returned by installed AKShare interfaces. Failure is isolated and never blocks local details.
+- **AKShare:** Bundled, lazy-loaded, and experimental. For China/Hong Kong companies it can map public, no-login symbol-list fields and stable metadata returned by AKShare interfaces. Failure is isolated and never blocks local details.
 - **Advanced API providers:** FMP and Alpha Vantage remain disabled by default and run only when advanced providers are explicitly enabled.
 
 ## Website evidence
@@ -41,6 +41,6 @@ Profile cache keys include normalized symbol, exchange/market, LEI, Wikidata ID,
 
 - The bundled index is not a real-time market source.
 - Public entity and legal-name matching is best-effort and confidence-gated.
-- AKShare is optional and depends on changing public upstream interfaces.
+- AKShare is bundled but experimental and depends on changing public upstream interfaces.
 - Many companies have no reliable no-key price, market capitalization, registry record, or news coverage.
 - No field is fabricated to improve visual completeness.

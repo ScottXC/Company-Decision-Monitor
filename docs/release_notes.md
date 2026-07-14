@@ -1,5 +1,44 @@
 # Release Notes
 
+## v0.1.4-generalized-search-performance-rc1
+
+- Froze the generalized local-first search architecture for release-candidate validation.
+- Added isolated symbol-universe integrity, schema, ANALYZE, FTS5 and n-gram validation.
+- Added cache-bypassed known-case and 450-case unseen holdout measurements.
+- Added category recall, SQL/fuzzy timing, shortlist distribution and slow-query counts.
+- Added a deterministic 20-ticker rapid-switch stress sequence.
+- Added simulated-offline search validation with temporary AppData and no network calls.
+- Added index corruption, missing-object and incompatible-schema regression tests.
+- Extended the frozen SQLite self-test with n-gram and schema-version checks.
+- Preserved background-only public enrichment, on-demand profile/news loading, and Xueqiu external-link-only behavior.
+- No provider, company-specific alias, fixed-query warmup, UI redesign, AI, risk engine or export feature was added.
+
+## v0.1.4-generalized-search-performance
+
+- Added a reproducible 450-case unseen-query benchmark sampled from bundled indexes.
+- Separated cold-process, cold-query, warm-query and cached-query measurements.
+- Added a generalized query planner for symbols, names, CJK text and short queries.
+- Added process-level immutable SQLite index management with thread-local read-only connections.
+- Added FTS5 prefix indexes and explicit Chinese/name n-gram candidate retrieval.
+- Removed the `aliases_json`/leading-wildcard fallback from the production search path.
+- Reduced the default RapidFuzz shortlist to 100 unique entities, with a hard combined limit of 200.
+- Added generic background index warmup without company-specific query preloading.
+- Isolated benchmark AppData, query cache and result cache from production data.
+- Added SQLite `EXPLAIN QUERY PLAN` validation for exact, prefix, FTS and n-gram queries.
+- Preserved local-first rendering, public-provider background enrichment, cancellation, and Xueqiu external-link-only behavior.
+
+## v0.1.4-open-source-data-expansion
+
+- Bundled AKShare 1.18.64 and required runtime dependencies.
+- Added a bundled A-share and Hong Kong SQLite security index with source metadata and FTS5.
+- Added `ChinaHkSymbolProvider` for fast offline Chinese name, alias and ticker search.
+- Improved A-share, Beijing Stock Exchange and Hong Kong symbol normalization.
+- Added lazy, background AKShare company-profile enrichment with cache and stale fallback.
+- Added frozen AKShare import self-test and China/HK release-artifact validation.
+- Preserved the no-API-key default workflow and existing global symbol search.
+- Preserved the Xueqiu external-link-only boundary; no Xueqiu content is requested or cached.
+- AKShare remains experimental because upstream public interfaces can change. Realtime price, market capitalization and complete profile/news coverage are not guaranteed and missing values are not fabricated.
+
 ## v0.1.3
 
 Release type: Stable Release.
