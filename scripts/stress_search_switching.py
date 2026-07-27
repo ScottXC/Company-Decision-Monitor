@@ -156,7 +156,7 @@ def main() -> int:
 
         shutdown_clean = page.shutdown(wait_ms=1000)
         report = {
-            "version": "v0.1.4-generalized-search-performance-rc1",
+            "version": "v0.1.5",
             "passed": all(item["pass"] for item in sequence_reports)
             and shutdown_clean
             and peak_active_threads <= MAX_SEARCH_WORKER_THREADS

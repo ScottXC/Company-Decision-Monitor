@@ -56,7 +56,7 @@ def main() -> int:
         )
         xueqiu = build_xueqiu_external_link(symbol="AAPL", company_name="Apple", market="US")
         report = {
-            "version": "v0.1.4-generalized-search-performance-rc1",
+            "version": "v0.1.5",
             "mode": "simulated_offline_no_network_calls",
             "temporary_appdata": True,
             "cases": results,

@@ -28,13 +28,16 @@ from PySide6.QtWidgets import (
 from cdm_desktop import APP_MODE_LABEL, PRODUCT_NAME_ZH, __version__
 from cdm_desktop.paths import AppPaths
 from cdm_desktop.public_api.cache import ApiCache
-from cdm_desktop.public_api.crawl_cache import WebEvidenceCache
-from cdm_desktop.public_api.crawlergo_provider import CrawlergoWebEvidenceProvider
+from cdm_desktop.public_api.crawlergo_runtime import (
+    CrawlergoRuntimeManager,
+    RuntimeTestResult,
+)
 from cdm_desktop.public_api.key_store import ApiKeyStore
 from cdm_desktop.public_api.models import ProviderStatus
 from cdm_desktop.public_api.registry import ProviderRegistry
 from cdm_desktop.public_api.search_service import PublicSearchService
 from cdm_desktop.public_api.settings_store import PublicApiSettingsStore
+from cdm_desktop.public_api.web_evidence_store import WebEvidenceStore
 from cdm_desktop.ui.components import (
     DetailGrid,
     PageHeader,
@@ -46,7 +49,7 @@ from cdm_desktop.ui.components import (
     scroll_container,
 )
 from cdm_desktop.ui.theme import ThemeManager
-from cdm_desktop.ui.widgets import ProgressFunctionWorker
+from cdm_desktop.ui.widgets import FunctionWorker, ProgressFunctionWorker
 
 ADVANCED_API_PROVIDERS = {"fmp", "alpha_vantage", "marketaux", "opencorporates", "companies_house"}
 
@@ -64,7 +67,7 @@ class SettingsPage(QWidget):
         self.search_service = PublicSearchService(paths)
         self.settings_store = PublicApiSettingsStore(paths)
         self.cache = ApiCache(paths)
-        self.web_evidence_cache = WebEvidenceCache(paths)
+        self.web_evidence_store = WebEvidenceStore(paths)
         self.inputs: dict[str, QLineEdit] = {}
         self.thread_pool = QThreadPool.globalInstance()
         self.test_running = False
@@ -99,7 +102,7 @@ class SettingsPage(QWidget):
         tabs.addTab(self._search_settings_tab(), "搜索")
         tabs.addTab(self._cache_privacy_tab(), "缓存与隐私")
         tabs.addTab(self._keys_tab(), "高级数据源")
-        tabs.addTab(self._crawlergo_tab(), "高级")
+        tabs.addTab(self._crawlergo_tab(), "网页证据")
         tabs.addTab(self._about_tab(), "关于")
         self.layout.addWidget(tabs)
         self.layout.addStretch()
@@ -293,21 +296,37 @@ class SettingsPage(QWidget):
     def _crawlergo_tab(self) -> QWidget:
         page = self._tab_page()
         policy = self.settings_store.crawlergo_policy()
-        provider = CrawlergoWebEvidenceProvider(crawlergo_path=self.settings_store.crawlergo_path(), cache=self.web_evidence_cache)
-        state, message = provider.dependency_status()
+        runtime_manager = CrawlergoRuntimeManager(
+            external_binary_path=self.settings_store.crawlergo_path(),
+            external_chrome_path=self.settings_store.crawlergo_chrome_path(),
+        )
+        runtime = runtime_manager.discover()
 
         intro, intro_layout = self._compact_panel(
-            "网页证据采集",
-            "仅用于用户指定公司官网或授权公开页面。软件不会绕过登录、验证码、登录凭据、访问令牌或 robots.txt 限制。",
+            "网页证据",
+            "网页证据仅采集用户指定公司官网及允许访问的公开页面。软件不会绕过登录、验证码、Cookie、Token、付费墙或 robots.txt。",
         )
-        intro_layout.addWidget(StatusBadge(friendly_state_label(state), friendly_state_tone(state)))
-        note = QLabel("默认只展示短摘录、元数据和原文链接；雪球仅外部打开，不缓存第三方网页全文，不进入 AI/RAG。")
+        status_row = QHBoxLayout()
+        status_row.addWidget(
+            StatusBadge(
+                f"crawlergo：{friendly_state_label(runtime.state)}",
+                friendly_state_tone(runtime.state),
+            )
+        )
+        status_row.addWidget(StatusBadge(f"模式：{runtime.mode}", "neutral"))
+        status_row.addWidget(StatusBadge(f"Chrome：{runtime.chrome_status}", "neutral"))
+        status_row.addStretch()
+        intro_layout.addLayout(status_row)
+        note = QLabel(
+            "Crawlergo 当前保持可选外部工具；安全审计未满足前不随安装包分发。实际采集使用受控 GET-only 管线。"
+            "官网可显示清理正文；第三方仅显示短摘录、元数据和原文链接；雪球完全排除。"
+        )
         note.setObjectName("MutedText")
         note.setWordWrap(True)
         intro_layout.addWidget(note)
         page.layout().addWidget(intro)
 
-        config, config_layout = self._compact_panel("crawlergo 配置", message)
+        config, config_layout = self._compact_panel("Crawlergo Runtime", runtime.message)
         path_row = QHBoxLayout()
         self.crawlergo_path_input = QLineEdit()
         self.crawlergo_path_input.setPlaceholderText("crawlergo.exe 路径，例如 C:\\tools\\crawlergo\\crawlergo.exe")
@@ -321,6 +340,17 @@ class SettingsPage(QWidget):
         path_row.addWidget(browse_btn)
         path_row.addWidget(test_btn)
         config_layout.addLayout(path_row)
+
+        chrome_row = QHBoxLayout()
+        self.crawlergo_chrome_path_input = QLineEdit()
+        self.crawlergo_chrome_path_input.setPlaceholderText("可选 Chrome / Chromium 可执行文件路径")
+        self.crawlergo_chrome_path_input.setText(self.settings_store.crawlergo_chrome_path())
+        chrome_browse_btn = QPushButton("选择")
+        chrome_browse_btn.clicked.connect(self._choose_crawlergo_chrome_path)
+        chrome_row.addWidget(QLabel("浏览器路径"))
+        chrome_row.addWidget(self.crawlergo_chrome_path_input, 1)
+        chrome_row.addWidget(chrome_browse_btn)
+        config_layout.addLayout(chrome_row)
 
         limits = QGridLayout()
         self.crawlergo_max_pages = QSpinBox()
@@ -341,8 +371,10 @@ class SettingsPage(QWidget):
         self.crawlergo_cache_ttl.setRange(1, 168)
         self.crawlergo_cache_ttl.setValue(max(1, int(policy.cache_ttl_seconds / 3600)))
         self.crawlergo_cache_ttl.setSuffix(" 小时")
-        self.crawlergo_full_text = QCheckBox("高级模式：允许展示完整提取文本")
-        self.crawlergo_full_text.setChecked(policy.allow_full_text_display)
+        self.web_evidence_content_limit = QSpinBox()
+        self.web_evidence_content_limit.setRange(2, 500)
+        self.web_evidence_content_limit.setValue(max(2, int(policy.max_content_chars / 1000)))
+        self.web_evidence_content_limit.setSuffix(" 千字符")
         limits.addWidget(QLabel("最大页数"), 0, 0)
         limits.addWidget(self.crawlergo_max_pages, 0, 1)
         limits.addWidget(QLabel("最大深度"), 0, 2)
@@ -354,8 +386,16 @@ class SettingsPage(QWidget):
         limits.addWidget(QLabel("缓存 TTL"), 2, 0)
         limits.addWidget(self.crawlergo_cache_ttl, 2, 1)
         limits.addWidget(StatusBadge("robots.txt 始终开启", "success"), 2, 2)
-        limits.addWidget(self.crawlergo_full_text, 2, 3)
+        limits.addWidget(self.web_evidence_content_limit, 2, 3)
         config_layout.addLayout(limits)
+
+        blocked_row = QHBoxLayout()
+        self.web_evidence_blocked_domains = QLineEdit()
+        self.web_evidence_blocked_domains.setPlaceholderText("额外阻止域名，以逗号分隔")
+        self.web_evidence_blocked_domains.setText(", ".join(policy.blocked_domains))
+        blocked_row.addWidget(QLabel("Blocked domains"))
+        blocked_row.addWidget(self.web_evidence_blocked_domains, 1)
+        config_layout.addLayout(blocked_row)
         page.layout().addWidget(config)
 
         boundaries, boundaries_layout = self._compact_panel("合规边界")
@@ -366,12 +406,17 @@ class SettingsPage(QWidget):
                     ("默认页数 / 深度", f"{policy.max_pages_per_domain} 页 / 深度 {policy.max_depth}"),
                     ("robots.txt", "采集前检查；不允许则跳过"),
                     ("禁止内容", "登录页、验证码、付费墙、社交平台正文、雪球内容"),
-                    ("缓存内容", "metadata、snippet、URL hash、抓取时间；不保存完整 HTML"),
-                    ("网页证据缓存大小", f"{self.web_evidence_cache.size_bytes() / 1024:.1f} KB"),
+                    ("正文规则", "官网保存清理正文；第三方仅保存摘录；PDF 不下载或解析正文"),
+                    ("本地存储", "AppData/web_evidence.sqlite；不保存原始 HTML、账号信息或访问凭据"),
+                    ("网页证据数据库大小", f"{self.web_evidence_store.size_bytes() / 1024:.1f} KB"),
                 ],
                 columns=2,
             )
         )
+        clear_button = QPushButton("清理全部网页证据缓存")
+        clear_button.setObjectName("DangerButton")
+        clear_button.clicked.connect(self._clear_web_evidence_store)
+        boundaries_layout.addWidget(clear_button)
         page.layout().addWidget(boundaries)
         return page
 
@@ -383,7 +428,7 @@ class SettingsPage(QWidget):
         grid.setVerticalSpacing(12)
 
         cache_panel, cache_layout = self._compact_panel("本地缓存", "用于减少公开数据源请求次数，不会打包进安装包。")
-        total_cache = self.cache.size_bytes() + self.web_evidence_cache.size_bytes()
+        total_cache = self.cache.size_bytes() + self.web_evidence_store.size_bytes()
         cache_layout.addWidget(QLabel(f"当前缓存大小：{total_cache / 1024:.1f} KB"))
         clear_cache = QPushButton("清理缓存")
         clear_cache.setObjectName("DangerButton")
@@ -421,7 +466,7 @@ class SettingsPage(QWidget):
             ("应用名称", PRODUCT_NAME_ZH),
             ("版本", f"v{__version__}"),
             ("模式", APP_MODE_LABEL),
-            ("质量标记", "v0.1.3 Modern Financial UI"),
+            ("质量标记", "v0.1.5 Web Evidence"),
             ("真实业务边界", "不提供投资建议，不提供交易、买卖、下单、目标价或收益预测。"),
         ]
         if self.paths:
@@ -584,6 +629,10 @@ class SettingsPage(QWidget):
     def _save_crawlergo_settings(self, *, show_message: bool = True) -> None:
         if hasattr(self, "crawlergo_path_input"):
             self.settings_store.set_crawlergo_path(self.crawlergo_path_input.text())
+        if hasattr(self, "crawlergo_chrome_path_input"):
+            self.settings_store.set_crawlergo_chrome_path(
+                self.crawlergo_chrome_path_input.text()
+            )
         if hasattr(self, "crawlergo_max_pages"):
             policy = self.settings_store.crawlergo_policy()
             policy.max_pages_per_domain = self.crawlergo_max_pages.value()
@@ -591,21 +640,75 @@ class SettingsPage(QWidget):
             policy.request_delay_seconds = float(self.crawlergo_delay.value())
             policy.timeout_seconds = self.crawlergo_timeout.value()
             policy.cache_ttl_seconds = self.crawlergo_cache_ttl.value() * 3600
-            policy.allow_full_text_display = self.crawlergo_full_text.isChecked()
+            policy.max_content_chars = self.web_evidence_content_limit.value() * 1000
+            policy.blocked_domains = [
+                value.strip().casefold().strip(".")
+                for value in self.web_evidence_blocked_domains.text().split(",")
+                if value.strip()
+            ]
             self.settings_store.set_crawlergo_policy(policy)
         if show_message:
-            QMessageBox.information(self, "网页证据采集", "crawlergo 设置已保存。")
+            QMessageBox.information(self, "网页证据", "网页证据与可选运行时设置已保存。")
 
     def _choose_crawlergo_path(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(self, "选择 crawlergo.exe", "", "Executable (*.exe);;All files (*.*)")
         if path:
             self.crawlergo_path_input.setText(path)
 
+    def _choose_crawlergo_chrome_path(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "选择 Chrome / Chromium",
+            "",
+            "Executable (*.exe);;All files (*.*)",
+        )
+        if path:
+            self.crawlergo_chrome_path_input.setText(path)
+
     def _test_crawlergo(self) -> None:
         self._save_crawlergo_settings(show_message=False)
-        provider = CrawlergoWebEvidenceProvider(crawlergo_path=self.settings_store.crawlergo_path(), cache=self.web_evidence_cache)
-        state, message = provider.dependency_status()
-        QMessageBox.information(self, "测试 crawlergo", f"{friendly_state_label(state)}：{message}")
+        self._crawlergo_test_manager = CrawlergoRuntimeManager(
+            external_binary_path=self.settings_store.crawlergo_path(),
+            external_chrome_path=self.settings_store.crawlergo_chrome_path(),
+        )
+        worker = FunctionWorker(self._crawlergo_test_manager.test_runtime)
+        self._crawlergo_test_worker = worker
+        worker.signals.finished.connect(self._show_crawlergo_test_result)
+        worker.signals.error.connect(
+            lambda message: QMessageBox.warning(
+                self,
+                "测试 crawlergo",
+                sanitize_error_message(message),
+            )
+        )
+        self.thread_pool.start(worker)
+
+    def _show_crawlergo_test_result(self, result: object) -> None:
+        if not isinstance(result, RuntimeTestResult):
+            QMessageBox.warning(self, "测试 crawlergo", "运行时返回未知诊断结果。")
+            return
+        details = result.message
+        if result.binary_version:
+            details += f"\nCrawlergo：{result.binary_version}"
+        if result.chrome_version:
+            details += f"\nChrome：{result.chrome_version}"
+        QMessageBox.information(
+            self,
+            "测试 crawlergo",
+            f"{friendly_state_label(result.state)}：{details}",
+        )
+
+    def _clear_web_evidence_store(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "清理网页证据",
+            "确认清空所有公司的网页证据、任务记录和候选字段吗？此操作不影响自选公司。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        count = self.web_evidence_store.clear_all()
+        QMessageBox.information(self, "网页证据", f"已清理 {count} 条网页证据。")
+        self.refresh()
 
     def _clear_key(self, key_name: str) -> None:
         self.key_store.clear(key_name)
@@ -693,8 +796,13 @@ class SettingsPage(QWidget):
                 self._clear_layout(child_layout)
 
     def _clear_cache(self) -> None:
-        count = self.cache.clear() + self.web_evidence_cache.clear()
-        QMessageBox.information(self, "缓存", f"已清理 {count} 个缓存文件。")
+        cache_files = self.cache.clear()
+        evidence_items = self.web_evidence_store.clear_all()
+        QMessageBox.information(
+            self,
+            "缓存",
+            f"已清理 {cache_files} 个公开数据缓存文件和 {evidence_items} 条网页证据。",
+        )
         self.refresh()
 
     def _switch_to_keys(self) -> None:

@@ -123,7 +123,7 @@ def run_benchmark(*, measure_public: bool = False, cache_bypass: bool = True) ->
         for rank in (1, 3, 5)
     }
     return {
-        "version": "v0.1.4-generalized-search-performance-rc1",
+        "version": "v0.1.5",
         "benchmark_type": "known_regression_cases",
         "cache_bypass_requested": cache_bypass,
         "passed": all(checks.values()),

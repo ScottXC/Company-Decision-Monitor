@@ -122,7 +122,7 @@ def run_benchmark() -> dict[str, Any]:
         "shortlist_bounded": summary["max_shortlist"] <= 200,
     }
     return {
-        "version": "v0.1.4-generalized-search-performance-rc1",
+        "version": "v0.1.5",
         "random_seed": RANDOM_SEED,
         "passed": all(checks.values()),
         "checks": checks,

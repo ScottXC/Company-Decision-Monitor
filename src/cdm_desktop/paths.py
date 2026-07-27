@@ -18,6 +18,11 @@ class AppPaths:
     cache_dir: Path
     db_path: Path
 
+    @property
+    def web_evidence_db_path(self) -> Path:
+        """Independent user-owned Web Evidence database; never a bundled resource."""
+        return self.app_data_dir / "web_evidence.sqlite"
+
     def ensure(self) -> AppPaths:
         self.app_data_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)

@@ -33,7 +33,7 @@ def make_paths(tmp_path: Path) -> AppPaths:
 
 
 def test_open_source_data_mode_labels() -> None:
-    assert __version__ == "0.1.4"
+    assert __version__ == "0.1.5"
     assert APP_MODE_LABEL == "Open-Source Data Mode"
 
 
@@ -47,6 +47,7 @@ def test_advanced_api_providers_default_disabled(tmp_path: Path) -> None:
     assert "fmp" not in provider_ids
     assert "alpha_vantage" not in provider_ids
     assert "marketaux" not in provider_ids
+    assert "crawlergo_web_evidence" not in provider_ids
     assert fmp.state == "disabled"
     assert "无需配置" in fmp.message
 
@@ -60,6 +61,7 @@ def test_advanced_api_providers_can_be_enabled_explicitly(tmp_path: Path) -> Non
     assert "fmp" in provider_ids
     assert "alpha_vantage" in provider_ids
     assert "marketaux" in provider_ids
+    assert "crawlergo_web_evidence" not in provider_ids
 
 
 def test_registry_includes_open_source_providers_and_legacy_disabled() -> None:

@@ -17,7 +17,7 @@ except ModuleNotFoundError:
 
 APP_NAME = "CompanyDecisionMonitor"
 EXE_NAME = "CompanyDecisionMonitor.exe"
-VERSION_NAME = "v0.1.4-generalized-search-performance-rc1"
+VERSION_NAME = "v0.1.5"
 SYMBOL_UNIVERSE_INDEX = Path("src") / "cdm_desktop" / "resources" / "symbol_universe" / "symbol_universe.sqlite"
 CHINA_HK_INDEX = Path("src") / "cdm_desktop" / "resources" / "china_hk_symbols" / "china_hk_symbols.sqlite"
 
@@ -44,6 +44,7 @@ def find_iscc() -> tuple[str | None, list[str]]:
         os.environ.get("INNO_SETUP_COMPILER"),
         r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
         r"C:\Program Files\Inno Setup 6\ISCC.exe",
+        r"D:\Software\Inno Setup 7\ISCC.exe",
     ]
 
     checked: list[str] = []
@@ -144,6 +145,7 @@ def main() -> int:
         _verify_pyinstaller_output(dist_app_dir, exe_path)
         _run_frozen_sqlite_self_test(exe_path, root)
         _run_frozen_akshare_self_test(exe_path, root)
+        _run_frozen_crawlergo_self_test(exe_path, root)
         print(f"EXE: {exe_path}")
 
         _phase("便携版 zip 生成")
@@ -343,6 +345,8 @@ def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
         dist_app_dir / "_internal" / "third_party" / "licenses" / "cleanco_LICENSE.txt",
         dist_app_dir / "_internal" / "third_party" / "licenses" / "FinanceDatabase_LICENSE.txt",
         dist_app_dir / "_internal" / "third_party" / "licenses" / "AKShare_LICENSE.txt",
+        dist_app_dir / "_internal" / "third_party" / "licenses" / "BeautifulSoup_LICENSE.txt",
+        dist_app_dir / "_internal" / "third_party" / "licenses" / "lxml_LICENSE.txt",
         dist_app_dir / "_internal" / "sqlite3.dll",
         dist_app_dir / "_internal" / "_sqlite3.pyd",
     ]
@@ -389,6 +393,24 @@ def _run_frozen_akshare_self_test(exe_path: Path, root: Path) -> None:
     print(message)
     if completed.returncode != 0:
         raise RuntimeError(message)
+
+
+def _run_frozen_crawlergo_self_test(exe_path: Path, root: Path) -> None:
+    print("Running frozen optional crawlergo self-test")
+    completed = subprocess.run(
+        [str(exe_path), "--self-test", "crawlergo"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    output = (completed.stdout or "").strip()
+    print(output)
+    if completed.returncode != 0 or "crawlergo_optional_external" not in output:
+        raise RuntimeError(
+            "Optional crawlergo frozen self-test did not report its runtime state."
+        )
 
 
 def _build_installer(

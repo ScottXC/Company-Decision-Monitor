@@ -3,15 +3,25 @@
 <details open>
 <summary><strong>English</strong></summary>
 
-Current version: `v0.1.4-generalized-search-performance-rc1`
+Current version: `v0.1.5`
 
 Current mode: `Open-Source Data Mode`
 
-Release type: `Release Candidate`
+Release type: `Development build`
 
 Company Decision Monitor is a Windows desktop application for company research and corporate activity monitoring. In `Open-Source Data Mode`, normal users do not need to apply for API keys, install Python, run `pip install`, download open-source projects, or import local company files. The installer bundles the runtime dependencies and a generated open-source symbol index for company search, symbol metadata, entity fallback, RSS news fallback, and local watchlist refresh.
 
 The application does not provide investment advice, trading features, buy/sell/order workflows, portfolio P&L, target prices, or return forecasts.
+
+## v0.1.5 Web Evidence
+
+Company details now include a user-triggered **Web Evidence / 网页证据** tab. Users can collect a recognized company website or explicitly enter an allowed public URL, inspect cleaned official-site text, retain third-party metadata and short excerpts, open the original page, delete evidence, or clear a company's evidence. Ordinary company search never starts a web collection task.
+
+Every target and redirect passes public-IP/SSRF validation and mandatory robots.txt policy. Jobs use a dedicated two-worker pool, stay within the selected domain, honor crawl delay, enforce page/depth/time/content limits, and support cancellation. Raw HTML, cookies, tokens, account data, and browser profiles are not stored. Xueqiu is hard-blocked from Web Evidence and remains a system-browser external link only.
+
+Evidence is stored in an independent user AppData `web_evidence.sqlite`, not in either bundled symbol index and not in release artifacts. Official-domain JSON-LD Organization fields can create traceable profile candidates; only high-confidence, conflict-free values can fill an empty profile field automatically. Third-party content is never auto-applied.
+
+Crawlergo and Chromium are **not bundled**. Settings can detect bundled/system/external paths and test an optional external runtime, but v0.1.5 production collection uses a bounded GET-only pipeline. Active crawlergo discovery is disabled because the audited upstream CLI cannot disable form submission and DOM-event triggering. See [Web Evidence architecture and limitations](docs/web_evidence.md).
 
 ## v0.1.4 generalized search performance
 
@@ -111,7 +121,7 @@ See `docs/search_performance.md` for architecture, targets, and limitations.
 | cleanco | English company-name legal suffix cleaning | Yes | MIT | Used with the existing Chinese suffix cleaner. |
 | FinanceDatabase generated symbol index | Global equities symbol universe fallback | Yes, as SQLite index | MIT source package | `symbol_universe.sqlite` is bundled; FinanceDatabase itself is build-time only. |
 | AKShare | Experimental China/HK public no-key source | Optional | Not distributed in this package; recheck upstream before bundling | Not required by normal users; may report dependency_missing. |
-| crawlergo | Optional user-triggered webpage evidence discovery | No | GPL-3.0 | External binary path only; not bundled, vendored, or used for Xueqiu crawling. |
+| crawlergo | Optional Web Evidence runtime detection/diagnostics | No | GPL-3.0 | External path only; not bundled or used for active discovery in v0.1.5; never used for Xueqiu. |
 
 See `THIRD_PARTY_NOTICES.md` and `third_party/licenses/` for bundled component notices.
 
@@ -129,18 +139,12 @@ See `THIRD_PARTY_NOTICES.md` and `third_party/licenses/` for bundled component n
 
 Open-source and public no-key providers are best-effort. Coverage, freshness, and accuracy are not equivalent to a commercial financial database.
 
-## v0.1.3-crawlergo-web-evidence
+## Web Evidence boundaries
 
-This development module adds **Crawlergo Web Evidence Provider** for controlled company website evidence collection.
-
-- `crawlergo` is optional and is not bundled by default. Configure the binary path in **Settings → 网页证据采集**.
-- Crawling is only triggered manually from the company detail page or from a user-entered official/authorized URL.
-- The app checks `robots.txt`, applies domain rate limits, enforces maximum pages and maximum depth, and supports user cancellation.
-- The app does not bypass login, CAPTCHA, access credentials, paywalls, or risk-control systems.
-- The app does not crawl Xueqiu content. Xueqiu remains external-link only.
-- The app does not collect WeChat public account articles, login-only forums, paid news sites, or social-platform body text.
-- By default, the app stores and displays only metadata, short snippets, text previews, and original links.
-- Third-party full page text is not cached, indexed, sent to AI/RAG, or used for training.
+- Collection is manually triggered from Company Details; search, profile loading, and news loading do not start it.
+- The GET-only transport does not submit forms, handle login, import browser credentials, bypass CAPTCHA/paywalls, or carry caller-supplied Cookie/Token headers.
+- Official sites may retain bounded cleaned text; third-party pages retain metadata and excerpts only; PDFs retain metadata without body download or parsing.
+- No evidence enters AI/RAG, training, risk scoring, report export, or the news count.
 
 ## v0.1.3-search-recall-hotfix
 
@@ -441,16 +445,26 @@ Please report bugs, provider problems, installation issues, and feature requests
 <details>
 <summary><strong>中文</strong></summary>
 
-当前版本：`v0.1.4-generalized-search-performance-rc1`
+当前版本：`v0.1.5`
 当前模式：`Open-Source Data Mode`
 
 Company Decision Monitor 是面向普通用户的公司研究与企业动态监控 Windows 桌面软件。当前版本默认不要求普通用户申请任何 API key，不要求安装 Python，不要求手动 `pip install`，也不要求导入 Excel、CSV 或本地公司数据库；安装包会内置运行依赖和开源 symbol universe 索引。
 
 本软件不提供投资建议，不提供交易、买入、卖出、下单、组合收益或目标价功能。
 
+## v0.1.5 网页证据
+
+公司详情页新增「网页证据」页签。用户可以主动采集已识别的公司官网，或明确输入允许访问的公开 URL；官网可查看清理后的正文，第三方页面只保存元数据和短摘录，PDF 只保存标题、类型与链接，不下载或解析正文。普通公司搜索不会启动网页采集。
+
+每个目标 URL 和重定向都会重新执行公网 IP / SSRF 校验与强制 robots.txt 检查。任务使用独立的两线程采集池，默认同域、最多 15 页、深度 2、请求间隔至少 1 秒、总超时 30 秒，并支持取消。软件不保存原始 HTML、Cookie、Token、账号数据或浏览器配置；雪球被硬性排除，仍只通过系统浏览器打开。
+
+网页证据存放在用户 AppData 的独立 `web_evidence.sqlite`，不会修改两套内置证券索引，也不会进入 EXE、Portable ZIP 或 Installer。官网 JSON-LD Organization 字段会生成可追踪候选；只有当前字段为空、没有冲突且置信度足够高时才会自动采用，第三方字段不会自动写入公司档案。
+
+本版本不内置 crawlergo 或 Chromium。设置页可以检测 bundled/system/external 状态并测试用户自行配置的外部运行时，但正式采集采用受限 GET-only 管线；原因是已审计的上游 crawlergo CLI 无法关闭表单提交和 DOM 事件触发。完整架构和限制见 [docs/web_evidence.md](docs/web_evidence.md)。
+
 ## v0.1.3 公司资料完整度
 
-v0.1.3 正式版包含经过发布候选验证的公司资料完整度改进。当前 v0.1.4 开发版已内置 AKShare 1.18.64 和中国/港股本地证券索引，普通用户无需 Python、pip 或 API key。公开无 key 来源不等同于商业实时数据库，价格、市值、新闻和完整法人资料可能缺失；系统不会伪造缺失字段。
+v0.1.3 正式版包含经过发布候选验证的公司资料完整度改进。v0.1.5 继续内置 AKShare 1.18.64 和中国/港股本地证券索引，普通用户无需 Python、pip 或 API key。公开无 key 来源不等同于商业实时数据库，价格、市值、新闻和完整法人资料可能缺失；系统不会伪造缺失字段。
 
 ## 公司资料补全机制
 
@@ -520,7 +534,7 @@ python scripts\benchmark_search.py
 | cleanco | 英文公司名后缀清理 | 是 | MIT | 与内置中文后缀清理规则配合使用。 |
 | FinanceDatabase 生成的 symbol index | 全球 equities symbol universe fallback | 是，SQLite 索引 | MIT source package | 只用于搜索召回，不是实时行情源。 |
 | AKShare | 中国 A 股/港股 experimental public source | 可选 | 本安装包不分发；正式内置前需复核上游许可证 | 默认不阻塞主流程。 |
-| crawlergo | 手动网页证据发现 | 否 | GPL-3.0 | 外部路径配置，不内置、不抓取雪球。 |
+| crawlergo | 网页证据可选运行时检测/诊断 | 否 | GPL-3.0 | 仅外部路径；v0.1.5 不用于主动发现，不内置、不抓取雪球。 |
 
 详见 `THIRD_PARTY_NOTICES.md` 和 `third_party/licenses/`。
 
@@ -538,18 +552,12 @@ python scripts\benchmark_search.py
 
 开源和公开无 key 数据源是 best-effort，不等同于商业金融数据库；覆盖范围、实时性和准确性会受公开来源限制。
 
-## v0.1.3-crawlergo-web-evidence
+## 网页证据边界
 
-本开发模块新增「网页证据采集」，用于在公司详情页手动采集公司官网或授权公开页面的网页证据。
-
-- `crawlergo` 是可选外部二进制文件，默认不随安装包打包；可在「设置 → 网页证据采集」配置路径。
-- 采集只能由用户在公司详情页点击触发，或由用户手动输入官网 / IR / 授权公开 URL 触发。
-- 采集前检查 `robots.txt`，支持域名限速、最大页数、最大深度和用户取消。
-- 不绕过登录、验证码、登录凭据、访问令牌、付费墙或风控限制。
-- 雪球仍然只是外部链接入口，不采集雪球内容。
-- 不采集微信公众号、需要登录的论坛、付费新闻站或社交平台正文。
-- 默认只保存和展示元数据、短摘录、文本预览和原文链接。
-- 不缓存第三方网页全文，不进入 AI/RAG，不用于训练数据。
+- 只能从公司详情页由用户主动触发；搜索、公司资料加载和新闻加载不会自动启动采集。
+- GET-only 传输不会提交表单、处理登录、导入浏览器凭据、绕过验证码/付费墙，也不接受调用方 Cookie/Token 请求头。
+- 官网可保存有长度上限的清理正文；第三方只保存元数据与摘录；PDF 不下载正文。
+- 网页证据不进入 AI/RAG、训练、风险评分、报告导出或新闻数量。
 
 ## v0.1.3-search-recall-hotfix
 

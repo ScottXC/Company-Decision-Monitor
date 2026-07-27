@@ -131,6 +131,36 @@ def _self_test_akshare() -> int:
     return 0
 
 
+def _self_test_crawlergo() -> int:
+    try:
+        from cdm_desktop.paths import get_app_paths
+        from cdm_desktop.public_api.crawlergo_runtime import CrawlergoRuntimeManager
+        from cdm_desktop.public_api.settings_store import PublicApiSettingsStore
+
+        settings = PublicApiSettingsStore(get_app_paths())
+        manager = CrawlergoRuntimeManager(
+            external_binary_path=settings.crawlergo_path(),
+            external_chrome_path=settings.crawlergo_chrome_path(),
+        )
+        status = manager.discover()
+        lines = [
+            "crawlergo_optional_external",
+            f"configured={str(status.configured).lower()}",
+            f"mode={status.mode}",
+            f"binary_status={status.binary_status}",
+            f"chrome_status={status.chrome_status}",
+            f"discovery_enabled={str(status.discovery_enabled).lower()}",
+        ]
+        if status.state == "enabled":
+            diagnostic = manager.test_runtime()
+            lines.append(f"diagnostic_state={diagnostic.state}")
+        print("\n".join(lines))
+        return 0
+    except Exception as exc:
+        print(f"crawlergo optional self-test diagnostic failed: {type(exc).__name__}", file=sys.stderr)
+        return 1
+
+
 def _write_self_test_report(message: str) -> None:
     report_path = os.environ.get("CDM_SELF_TEST_REPORT", "").strip()
     if report_path:
@@ -143,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
         return _self_test_sqlite()
     if args == ["--self-test", "akshare"]:
         return _self_test_akshare()
+    if args == ["--self-test", "crawlergo"]:
+        return _self_test_crawlergo()
 
     from cdm_desktop.app import create_qapplication
     from cdm_desktop.logging_config import configure_logging

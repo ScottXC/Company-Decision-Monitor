@@ -1,6 +1,6 @@
 #define AppName "Company Decision Monitor"
-#define AppVersion "0.1.4"
-#define AppVersionName "v0.1.4-generalized-search-performance-rc1"
+#define AppVersion "0.1.5"
+#define AppVersionName "v0.1.5"
 #define AppPublisher "CompanyDecisionMonitor"
 #define AppExeName "CompanyDecisionMonitor.exe"
 #define AppDistDir "..\dist\CompanyDecisionMonitor"

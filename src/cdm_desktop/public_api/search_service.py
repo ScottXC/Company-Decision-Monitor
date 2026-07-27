@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 from cdm_desktop.paths import AppPaths
 from cdm_desktop.public_api.cache import ApiCache, cache_key
-from cdm_desktop.public_api.crawlergo_provider import CrawlergoWebEvidenceProvider
+from cdm_desktop.public_api.crawlergo_runtime import CrawlergoRuntimeManager
 from cdm_desktop.public_api.http_client import PublicHttpClient
 from cdm_desktop.public_api.key_store import ApiKeyStore
 from cdm_desktop.public_api.models import (
@@ -34,7 +34,12 @@ SearchRegion = str
 SearchScope = str
 
 LOCAL_PROVIDER_IDS = {"china_hk_symbol_index", "symbol_universe", "nasdaq_directory"}
-SEARCH_EXCLUDED_PROVIDER_IDS = {"rss", "marketaux", "xueqiu_external"}
+SEARCH_EXCLUDED_PROVIDER_IDS = {
+    "rss",
+    "marketaux",
+    "xueqiu_external",
+    "crawlergo_web_evidence",
+}
 PUBLIC_ENRICHMENT_TIMEOUT_SECONDS = 3.0
 PUBLIC_ENRICHMENT_BUDGET_SECONDS = 5.0
 MAX_BACKGROUND_PROVIDER_TASKS = 4
@@ -529,7 +534,11 @@ class PublicSearchService:
                 state = "disabled"
                 message = meta.notes or "当前版本为 registry/stub，暂未接入真实请求。"
             elif meta.provider_id == "crawlergo_web_evidence":
-                state, message = CrawlergoWebEvidenceProvider(crawlergo_path=self.settings.crawlergo_path()).dependency_status()
+                runtime = CrawlergoRuntimeManager(
+                    external_binary_path=self.settings.crawlergo_path(),
+                    external_chrome_path=self.settings.crawlergo_chrome_path(),
+                ).discover()
+                state, message = runtime.state, runtime.message
             elif not meta.requires_key and not meta.enabled_by_default and not advanced_enabled:
                 state = "disabled"
                 message = "Legacy / advanced provider 默认关闭；普通用户使用内置开源索引。"
@@ -569,7 +578,11 @@ class PublicSearchService:
                     meta.notes or "当前版本暂未接入真实请求。",
                 )
             elif meta.provider_id == "crawlergo_web_evidence":
-                state, message = CrawlergoWebEvidenceProvider(crawlergo_path=self.settings.crawlergo_path()).dependency_status()
+                runtime = CrawlergoRuntimeManager(
+                    external_binary_path=self.settings.crawlergo_path(),
+                    external_chrome_path=self.settings.crawlergo_chrome_path(),
+                ).discover()
+                state, message = runtime.state, runtime.message
                 status = ProviderStatus(meta.provider_id, meta.display_name, meta.category, state, message)
             elif meta.requires_key and not self.key_store.get(meta.key_name or ""):
                 if not meta.enabled_by_default and not advanced_enabled:

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QThreadPool, QUrl
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
     QLayout,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QTabWidget,
@@ -20,13 +24,20 @@ from PySide6.QtWidgets import (
 
 from cdm_desktop.paths import AppPaths
 from cdm_desktop.public_api import CompanyNewsService, CompanyProfileService
-from cdm_desktop.public_api.crawlergo_provider import CrawlergoWebEvidenceProvider
+from cdm_desktop.public_api.crawlergo_runtime import CrawlergoRuntimeManager
 from cdm_desktop.public_api.data_quality import is_meaningful_value
 from cdm_desktop.public_api.models import CompanyProfile, CompanyResult, NewsItem, ProviderStatus
+from cdm_desktop.public_api.profile_candidates import apply_auto_accepted_candidates
 from cdm_desktop.public_api.settings_store import PublicApiSettingsStore
 from cdm_desktop.public_api.watchlist_store import WatchlistStore
-from cdm_desktop.public_api.web_evidence_models import CrawlResult, WebEvidenceItem
+from cdm_desktop.public_api.web_evidence_models import (
+    CrawlResult,
+    ProfileFieldCandidate,
+    WebEvidenceItem,
+)
+from cdm_desktop.public_api.web_evidence_store import WebEvidenceStore
 from cdm_desktop.public_api.xueqiu_external_link import build_xueqiu_external_link
+from cdm_desktop.services.web_evidence_service import WebEvidenceService
 from cdm_desktop.ui.components import (
     CollapsibleSection,
     CompanyAvatar,
@@ -59,10 +70,24 @@ class CompanyDetailPage(QWidget):
         self.news_service = CompanyNewsService(paths)
         self.watchlist = WatchlistStore(paths)
         self.settings_store = PublicApiSettingsStore(paths)
+        self.web_evidence_store = WebEvidenceStore(paths)
+        self.crawlergo_runtime = CrawlergoRuntimeManager(
+            external_binary_path=self.settings_store.crawlergo_path(),
+            external_chrome_path=self.settings_store.crawlergo_chrome_path(),
+        )
+        self.web_evidence_service = WebEvidenceService(
+            paths,
+            store=self.web_evidence_store,
+            runtime_manager=self.crawlergo_runtime,
+        )
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(3)
+        self.crawl_thread_pool = QThreadPool(self)
+        self.crawl_thread_pool.setMaxThreadCount(2)
         self._active_workers: set[FunctionWorker] = set()
+        self._active_crawl_workers: set[FunctionWorker] = set()
         self.web_crawl_cancel_event: threading.Event | None = None
+        self._web_crawl_company_id = ""
         self._profile_statuses: list[ProviderStatus] = []
         self._news_statuses: list[ProviderStatus] = []
         self._loaded_profile: CompanyProfile | None = None
@@ -97,6 +122,10 @@ class CompanyDetailPage(QWidget):
             return
 
         immediate = self.profile_service.get_immediate_profile(company)
+        apply_auto_accepted_candidates(
+            immediate,
+            self.web_evidence_store.list_candidates(company.dedupe_key()),
+        )
         self._loaded_profile = immediate
         self.current_company = _company_from_profile(company, immediate)
         company = self.current_company or company
@@ -318,6 +347,31 @@ class CompanyDetailPage(QWidget):
         worker.signals.error.connect(fail)
         self.thread_pool.start(worker)
 
+    def _start_crawl_worker(
+        self,
+        worker: FunctionWorker,
+        on_finished: Callable[[object], None],
+        on_error: Callable[[str], None],
+    ) -> None:
+        worker.setAutoDelete(False)
+        self._active_crawl_workers.add(worker)
+
+        def finish(result: object) -> None:
+            try:
+                on_finished(result)
+            finally:
+                self._active_crawl_workers.discard(worker)
+
+        def fail(message: str) -> None:
+            try:
+                on_error(message)
+            finally:
+                self._active_crawl_workers.discard(worker)
+
+        worker.signals.finished.connect(finish)
+        worker.signals.error.connect(fail)
+        self.crawl_thread_pool.start(worker)
+
     def _is_current_request(self, request_id: int) -> bool:
         return self._accepting_results and request_id == self._detail_request_id
 
@@ -356,10 +410,16 @@ class CompanyDetailPage(QWidget):
         self._detail_request_id += 1
         if self.web_crawl_cancel_event:
             self.web_crawl_cancel_event.set()
+        self.web_evidence_service.shutdown()
         self.thread_pool.clear()
-        stopped = self.thread_pool.waitForDone(wait_ms)
-        if stopped:
+        self.crawl_thread_pool.clear()
+        details_stopped = self.thread_pool.waitForDone(wait_ms)
+        crawl_stopped = self.crawl_thread_pool.waitForDone(wait_ms)
+        stopped = details_stopped and crawl_stopped
+        if details_stopped:
             self._active_workers.clear()
+        if crawl_stopped:
+            self._active_crawl_workers.clear()
         return stopped
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
@@ -373,6 +433,11 @@ class CompanyDetailPage(QWidget):
         profile, statuses = result
         self._profile_statuses = list(statuses)
         if isinstance(profile, CompanyProfile):
+            company_id = self.current_company.dedupe_key() if self.current_company else ""
+            apply_auto_accepted_candidates(
+                profile,
+                self.web_evidence_store.list_candidates(company_id),
+            )
             self._loaded_profile = profile
             self.current_company = _company_from_profile(self.current_company, profile)
             self._rerender_profile_sections()
@@ -587,36 +652,71 @@ class CompanyDetailPage(QWidget):
     def _web_info_tab(self, company: CompanyResult) -> QWidget:
         page = self._tab_page()
         policy = self.settings_store.crawlergo_policy()
-        provider = CrawlergoWebEvidenceProvider(crawlergo_path=self.settings_store.crawlergo_path())
-        state, message = provider.dependency_status()
-        website = company.website or str(company.raw.get("website") or company.source_url or "")
+        self.crawlergo_runtime = CrawlergoRuntimeManager(
+            external_binary_path=self.settings_store.crawlergo_path(),
+            external_chrome_path=self.settings_store.crawlergo_chrome_path(),
+        )
+        self.web_evidence_service.runtime_manager = self.crawlergo_runtime
+        runtime = self.crawlergo_runtime.discover()
+        website = company.website or str(company.raw.get("website") or "")
+        company_id = company.dedupe_key()
+        existing_items = self.web_evidence_service.list_evidence(company_id)
 
         control = SectionCard(
-            "网页证据采集",
-            "用于采集公司官网或授权公开页面的元数据和短摘录。尊重 robots.txt，不绕过登录/验证码；雪球仅作为外部入口。",
+            "网页证据",
+            "用户主动采集公司官网及允许访问的公开页面。不会绕过登录、验证码、Cookie、Token、付费墙或 robots.txt。",
         )
-        control.layout.addWidget(StatusBadge(friendly_state_label(state), friendly_state_tone(state)))
-        control.layout.addWidget(QLabel(sanitize_error_message(message)))
+        runtime_row = QHBoxLayout()
+        runtime_row.addWidget(QLabel(f"当前官网：{website or '尚未识别'}"), 1)
+        runtime_row.addWidget(
+            StatusBadge(
+                f"crawlergo：{friendly_state_label(runtime.state)}",
+                friendly_state_tone(runtime.state),
+            )
+        )
+        runtime_row.addWidget(StatusBadge("robots.txt 始终开启", "success"))
+        control.layout.addLayout(runtime_row)
+        runtime_message = QLabel(sanitize_error_message(runtime.message))
+        runtime_message.setObjectName("MutedText")
+        runtime_message.setWordWrap(True)
+        control.layout.addWidget(runtime_message)
         input_row = QHBoxLayout()
         self.web_evidence_url = QLineEdit()
         self.web_evidence_url.setPlaceholderText("添加公司官网 / IR 页面 URL，例如 https://example.com/investors")
         self.web_evidence_url.setText(website)
-        crawl_btn = QPushButton("补充官网资料")
+        crawl_btn = QPushButton("采集官网")
         crawl_btn.setObjectName("PrimaryButton")
-        crawl_btn.clicked.connect(self._start_web_evidence_crawl)
-        cancel_btn = QPushButton("取消")
+        crawl_btn.setEnabled(bool(website))
+        crawl_btn.clicked.connect(
+            lambda _checked=False, url=website: self._start_web_evidence_crawl(url)
+        )
+        add_url_btn = QPushButton("添加 URL")
+        add_url_btn.clicked.connect(
+            lambda _checked=False: self._start_web_evidence_crawl(
+                self.web_evidence_url.text().strip()
+            )
+        )
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self._refresh_web_evidence)
+        cancel_btn = QPushButton("取消任务")
         cancel_btn.clicked.connect(self._cancel_web_evidence_crawl)
+        clear_btn = QPushButton("清理证据")
+        clear_btn.setObjectName("DangerButton")
+        clear_btn.clicked.connect(self._clear_company_web_evidence)
         input_row.addWidget(QLabel("URL"))
         input_row.addWidget(self.web_evidence_url, 1)
         input_row.addWidget(crawl_btn)
+        input_row.addWidget(add_url_btn)
+        input_row.addWidget(refresh_btn)
         input_row.addWidget(cancel_btn)
+        input_row.addWidget(clear_btn)
         control.layout.addLayout(input_row)
 
         self.web_evidence_progress = QProgressBar()
         self.web_evidence_progress.setRange(0, 1)
         self.web_evidence_progress.setValue(0)
         self.web_evidence_status = QLabel(
-            f"robots 合规已开启。默认最大 {policy.max_pages_per_domain} 页，最大深度 {policy.max_depth}。"
+            f"运行状态：空闲 · 默认最多 {policy.max_pages_per_domain} 页 / 深度 {policy.max_depth} / 同域采集。"
         )
         self.web_evidence_status.setObjectName("MutedText")
         self.web_evidence_status.setWordWrap(True)
@@ -626,10 +726,26 @@ class CompanyDetailPage(QWidget):
 
         self.web_evidence_list = QVBoxLayout()
         self.web_evidence_list.setSpacing(10)
-        list_host = SectionCard("网页证据列表", "默认只显示标题、类型、短摘录、采集时间和原文链接。")
+        recent = existing_items[0].crawled_at if existing_items else "尚无记录"
+        list_host = SectionCard(
+            "网页证据列表",
+            f"页面数量：{len(existing_items)} · 最近采集：{recent} · 官网正文可查看；第三方内容仅显示摘录。",
+        )
         list_host.layout.addLayout(self.web_evidence_list)
-        self.web_evidence_list.addWidget(EmptyState("暂无网页证据", "配置 crawlergo 路径后，可手动采集公司官网公开页面。"))
+        self._render_web_evidence_items(existing_items)
         page.layout().addWidget(list_host)
+
+        self.web_evidence_candidate_list = QVBoxLayout()
+        candidates = CollapsibleSection(
+            "资料字段候选",
+            "官网 JSON-LD 候选保留来源和置信度；冲突值必须由用户接受或拒绝。",
+            expanded=False,
+        )
+        candidates.body_layout.addLayout(self.web_evidence_candidate_list)
+        self._render_profile_candidates(
+            self.web_evidence_store.list_candidates(company_id)
+        )
+        page.layout().addWidget(candidates)
 
         self.web_evidence_diag = QVBoxLayout()
         diagnostics = CollapsibleSection("采集诊断", "显示 discovered URLs、skipped URLs、robots blocked、timeout 和 parse error。", expanded=False)
@@ -639,28 +755,48 @@ class CompanyDetailPage(QWidget):
         page.layout().addStretch()
         return page
 
-    def _start_web_evidence_crawl(self) -> None:
+    def _start_web_evidence_crawl(self, url_override: str = "") -> None:
         company = self.current_company
         if not company:
             return
-        url = self.web_evidence_url.text().strip()
-        if not url:
-            QMessageBox.information(self, "网页证据采集", "请先输入公司官网或 IR 页面 URL。")
+        if self.web_crawl_cancel_event and not self.web_crawl_cancel_event.is_set():
+            QMessageBox.information(self, "网页证据", "当前已有采集任务运行，请先等待完成或取消。")
             return
+        url = (url_override or self.web_evidence_url.text()).strip()
+        if not url:
+            QMessageBox.information(self, "网页证据", "请先输入公司官网或 IR 页面 URL。")
+            return
+        self.web_evidence_url.setText(url)
         self.web_crawl_cancel_event = threading.Event()
+        self._web_crawl_company_id = company.dedupe_key()
         self.web_evidence_progress.setRange(0, 1)
         self.web_evidence_progress.setValue(0)
-        self.web_evidence_status.setText("正在准备采集...")
+        self.web_evidence_status.setText("运行状态：正在准备安全校验与 robots.txt 检查...")
         self._clear_layout(self.web_evidence_list)
         self.web_evidence_list.addWidget(LoadingState("正在采集网页证据..."))
         worker = ProgressFunctionWorker(self._run_web_evidence_crawl, company, url)
-        worker.signals.progress.connect(self._update_web_evidence_progress)
-        self._start_worker(worker, self._render_web_evidence_result, self._render_web_evidence_error)
+        crawl_company_id = self._web_crawl_company_id
+        worker.signals.progress.connect(
+            lambda current, total, message, company_id=crawl_company_id: self._update_web_evidence_progress_for(
+                company_id,
+                current,
+                total,
+                message,
+            )
+        )
+        self._start_crawl_worker(
+            worker,
+            self._render_web_evidence_result,
+            lambda message, company_id=crawl_company_id: self._render_web_evidence_error_for(
+                company_id,
+                message,
+            ),
+        )
 
     def _cancel_web_evidence_crawl(self) -> None:
         if self.web_crawl_cancel_event:
             self.web_crawl_cancel_event.set()
-            self.web_evidence_status.setText("已请求取消，当前页面处理完成后停止。")
+            self.web_evidence_status.setText("运行状态：正在安全取消...")
 
     def _run_web_evidence_crawl(
         self,
@@ -669,12 +805,14 @@ class CompanyDetailPage(QWidget):
         *,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> CrawlResult:
-        provider = CrawlergoWebEvidenceProvider(crawlergo_path=self.settings_store.crawlergo_path())
         policy = self.settings_store.crawlergo_policy()
-        return provider.crawl(
+        return self.web_evidence_service.crawl(
+            company_id=company.dedupe_key(),
             company_name=company.name or company.display_name or company.symbol or "",
             seed_urls=[url],
             policy=policy,
+            company_website=company.website or str(company.raw.get("website") or ""),
+            profile=self._loaded_profile,
             progress_callback=progress_callback,
             cancel_event=self.web_crawl_cancel_event,
         )
@@ -682,25 +820,51 @@ class CompanyDetailPage(QWidget):
     def _update_web_evidence_progress(self, current: int, total: int, message: str) -> None:
         self.web_evidence_progress.setRange(0, max(total, 1))
         self.web_evidence_progress.setValue(max(0, min(current, max(total, 1))))
-        self.web_evidence_status.setText(sanitize_error_message(message))
+        self.web_evidence_status.setText(f"运行状态：{sanitize_error_message(message)}")
+
+    def _update_web_evidence_progress_for(
+        self,
+        company_id: str,
+        current: int,
+        total: int,
+        message: str,
+    ) -> None:
+        current_company_id = self.current_company.dedupe_key() if self.current_company else ""
+        if company_id == current_company_id:
+            self._update_web_evidence_progress(current, total, message)
 
     def _render_web_evidence_result(self, result: object) -> None:
-        self._clear_layout(self.web_evidence_list)
-        self._clear_layout(self.web_evidence_diag)
         if not isinstance(result, CrawlResult):
             self._render_web_evidence_error("网页证据采集返回未知结果。")
             return
-        self.web_evidence_progress.setRange(0, max(result.job.pages_discovered, 1))
+        current_company_id = self.current_company.dedupe_key() if self.current_company else ""
+        if result.job.company_id != current_company_id:
+            if result.job.company_id == self._web_crawl_company_id:
+                self.web_crawl_cancel_event = None
+            return
+        self._clear_layout(self.web_evidence_list)
+        self._clear_layout(self.web_evidence_diag)
+        self.web_crawl_cancel_event = None
+        self.web_evidence_progress.setRange(0, max(result.job.max_pages, 1))
         self.web_evidence_progress.setValue(result.job.pages_crawled)
         self.web_evidence_status.setText(
-            f"采集完成：发现 {result.job.pages_discovered}，采集 {result.job.pages_crawled}，跳过 {result.job.pages_skipped}。"
+            f"运行状态：{result.job.status} · 发现 {result.job.pages_discovered}，处理 {result.job.pages_crawled}，跳过 {result.job.pages_skipped}。"
         )
-        if result.error_message:
-            self.web_evidence_list.addWidget(EmptyState("网页证据采集不可用", sanitize_error_message(result.error_message)))
-        elif not result.items:
-            self.web_evidence_list.addWidget(EmptyState("没有可展示的网页证据", "目标页面可能被 robots.txt 禁止、超时或未返回可提取内容。"))
-        for item in result.items:
-            self.web_evidence_list.addWidget(self._web_evidence_card(item))
+        items = self.web_evidence_service.list_evidence(result.job.company_id)
+        self._render_web_evidence_items(items)
+        self._render_profile_candidates(
+            self.web_evidence_store.list_candidates(result.job.company_id)
+        )
+        if result.profile_candidates and self._loaded_profile:
+            self.current_company = _company_from_profile(
+                self.current_company,
+                self._loaded_profile,
+            )
+            self._rerender_profile_sections()
+        if result.error_message and not items:
+            self.web_evidence_list.addWidget(
+                EmptyState("网页证据采集不可用", sanitize_error_message(result.error_message))
+            )
         for url in result.discovered_urls[:20]:
             self.web_evidence_diag.addWidget(QLabel(f"发现：{url}"))
         for skipped in result.skipped_urls[:20]:
@@ -711,9 +875,14 @@ class CompanyDetailPage(QWidget):
             self.web_evidence_diag.addWidget(QLabel("无诊断信息。"))
 
     def _web_evidence_card(self, item: WebEvidenceItem) -> SectionCard:
-        card = SectionCard(item.title or item.final_url or item.source_url, f"{item.domain} · {item.content_type} · {item.crawled_at}")
+        card = SectionCard(
+            item.title or item.final_url or item.source_url,
+            f"{item.domain} · {item.content_type} · 采集于 {item.crawled_at}",
+        )
         badge_row = QHBoxLayout()
         badge_row.addWidget(StatusBadge("robots allowed" if item.robots_allowed else "robots blocked", "success" if item.robots_allowed else "danger"))
+        badge_row.addWidget(StatusBadge("来自公开网页", "info"))
+        badge_row.addWidget(StatusBadge(item.display_mode, "neutral"))
         if item.from_cache:
             badge_row.addWidget(StatusBadge("from_cache", "info"))
         badge_row.addStretch()
@@ -722,15 +891,170 @@ class CompanyDetailPage(QWidget):
         snippet.setObjectName("MutedText")
         snippet.setWordWrap(True)
         card.layout.addWidget(snippet)
+        actions = QHBoxLayout()
         open_btn = QPushButton("打开原文")
         open_btn.clicked.connect(lambda _checked=False, url=item.open_url or item.final_url: QDesktopServices.openUrl(QUrl(url)))
-        card.layout.addWidget(open_btn)
+        view_btn = QPushButton("查看内容")
+        view_btn.clicked.connect(lambda _checked=False, evidence=item: self._view_web_evidence(evidence))
+        delete_btn = QPushButton("删除")
+        delete_btn.setObjectName("DangerButton")
+        delete_btn.clicked.connect(
+            lambda _checked=False, evidence_id=item.id: self._delete_web_evidence(evidence_id)
+        )
+        actions.addWidget(open_btn)
+        actions.addWidget(view_btn)
+        actions.addWidget(delete_btn)
+        actions.addStretch()
+        card.layout.addLayout(actions)
         return card
 
     def _render_web_evidence_error(self, message: str) -> None:
+        self.web_crawl_cancel_event = None
         self._clear_layout(self.web_evidence_list)
         self.web_evidence_list.addWidget(EmptyState("网页证据采集失败", sanitize_error_message(message)))
-        self.web_evidence_status.setText(sanitize_error_message(message))
+        self.web_evidence_status.setText(f"运行状态：失败 · {sanitize_error_message(message)}")
+
+    def _render_web_evidence_error_for(self, company_id: str, message: str) -> None:
+        current_company_id = self.current_company.dedupe_key() if self.current_company else ""
+        if company_id != current_company_id:
+            if company_id == self._web_crawl_company_id:
+                self.web_crawl_cancel_event = None
+            return
+        self._render_web_evidence_error(message)
+
+    def _render_web_evidence_items(self, items: list[WebEvidenceItem]) -> None:
+        self._clear_layout(self.web_evidence_list)
+        if not items:
+            self.web_evidence_list.addWidget(
+                EmptyState(
+                    "暂无网页证据",
+                    "可主动采集已识别的公司官网，或添加允许访问的公开 URL。",
+                )
+            )
+            return
+        for item in items:
+            self.web_evidence_list.addWidget(self._web_evidence_card(item))
+
+    def _refresh_web_evidence(self) -> None:
+        company = self.current_company
+        if not company or not hasattr(self, "web_evidence_list"):
+            return
+        items = self.web_evidence_service.list_evidence(company.dedupe_key())
+        self._render_web_evidence_items(items)
+        if hasattr(self, "web_evidence_candidate_list"):
+            self._render_profile_candidates(
+                self.web_evidence_store.list_candidates(company.dedupe_key())
+            )
+        self.web_evidence_status.setText(f"运行状态：空闲 · 已加载 {len(items)} 条本地网页证据。")
+
+    def _delete_web_evidence(self, evidence_id: str) -> None:
+        if self.web_evidence_service.delete_evidence(evidence_id):
+            self._refresh_web_evidence()
+
+    def _clear_company_web_evidence(self) -> None:
+        company = self.current_company
+        if not company:
+            return
+        answer = QMessageBox.question(
+            self,
+            "清理网页证据",
+            "确认清空当前公司的全部网页证据和候选字段吗？此操作不影响自选公司。",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        count = self.web_evidence_service.clear_company(company.dedupe_key())
+        self._refresh_web_evidence()
+        self.web_evidence_status.setText(f"运行状态：空闲 · 已清理 {count} 条证据。")
+
+    def _render_profile_candidates(
+        self,
+        candidates: list[ProfileFieldCandidate],
+    ) -> None:
+        if not hasattr(self, "web_evidence_candidate_list"):
+            return
+        self._clear_layout(self.web_evidence_candidate_list)
+        if not candidates:
+            self.web_evidence_candidate_list.addWidget(
+                EmptyState("暂无资料字段候选", "采集到可验证的官网 JSON-LD 后会在这里显示。")
+            )
+            return
+        for candidate in candidates:
+            card = SectionCard(
+                candidate.field_name,
+                f"置信度 {candidate.confidence:.0%} · {candidate.status}",
+            )
+            proposed = QLabel(
+                "建议值："
+                + json.dumps(candidate.proposed_value, ensure_ascii=False)
+                + (f"\n当前值：{candidate.current_value}" if candidate.current_value else "")
+                + f"\n来源：{candidate.source_url}"
+            )
+            proposed.setWordWrap(True)
+            proposed.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            card.layout.addWidget(proposed)
+            if candidate.status == "pending":
+                actions = QHBoxLayout()
+                accept_btn = QPushButton("接受候选")
+                accept_btn.setObjectName("PrimaryButton")
+                accept_btn.clicked.connect(
+                    lambda _checked=False, candidate_id=candidate.id: self._set_profile_candidate_status(
+                        candidate_id,
+                        "accepted",
+                    )
+                )
+                reject_btn = QPushButton("拒绝候选")
+                reject_btn.clicked.connect(
+                    lambda _checked=False, candidate_id=candidate.id: self._set_profile_candidate_status(
+                        candidate_id,
+                        "rejected",
+                    )
+                )
+                actions.addWidget(accept_btn)
+                actions.addWidget(reject_btn)
+                actions.addStretch()
+                card.layout.addLayout(actions)
+            self.web_evidence_candidate_list.addWidget(card)
+
+    def _set_profile_candidate_status(self, candidate_id: str, status: str) -> None:
+        company = self.current_company
+        if not company or not self.web_evidence_store.update_candidate_status(candidate_id, status):
+            return
+        candidates = self.web_evidence_store.list_candidates(company.dedupe_key())
+        if status == "accepted" and self._loaded_profile:
+            selected = [candidate for candidate in candidates if candidate.id == candidate_id]
+            apply_auto_accepted_candidates(self._loaded_profile, selected)
+            self.current_company = _company_from_profile(company, self._loaded_profile)
+            self._rerender_profile_sections()
+        self._render_profile_candidates(candidates)
+
+    def _view_web_evidence(self, item: WebEvidenceItem) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(item.title or "网页证据内容")
+        dialog.resize(820, 640)
+        layout = QVBoxLayout(dialog)
+        source = QLabel(
+            f"来源：{item.canonical_url or item.final_url}\n"
+            f"发布时间：{item.published_at or '未提供'} · 采集时间：{item.crawled_at}"
+        )
+        source.setWordWrap(True)
+        source.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(source)
+        content = item.cleaned_text or item.content_snippet or item.extracted_text_preview
+        details = [content or "当前显示规则下没有可展示的正文。"]
+        if item.headings:
+            details.append("\n标题层级\n" + "\n".join(f"• {value}" for value in item.headings))
+        if item.structured_data:
+            details.append(
+                "\n提取字段\n"
+                + json.dumps(item.structured_data, ensure_ascii=False, indent=2)
+            )
+        viewer = QPlainTextEdit("\n".join(details))
+        viewer.setReadOnly(True)
+        layout.addWidget(viewer, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _xueqiu_external_link_card(self, company: CompanyResult) -> SectionCard:
         link = build_xueqiu_external_link(

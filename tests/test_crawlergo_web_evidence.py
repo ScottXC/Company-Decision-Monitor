@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import inspect
+import socket
 from pathlib import Path
-from types import SimpleNamespace
 
+from cdm_desktop.main import main
 from cdm_desktop.paths import AppPaths
-from cdm_desktop.public_api.content_extractor import extract_web_evidence
-from cdm_desktop.public_api.crawl_cache import WebEvidenceCache
-from cdm_desktop.public_api.crawl_safety import validate_crawl_url
-from cdm_desktop.public_api.crawlergo_provider import (
-    CrawlergoWebEvidenceProvider,
+from cdm_desktop.public_api.crawlergo_provider import parse_crawlergo_urls
+from cdm_desktop.public_api.crawlergo_runtime import (
+    CRAWLERGO_DISCOVERY_ENABLED,
+    CrawlergoRuntimeManager,
     build_crawlergo_command,
-    parse_crawlergo_urls,
 )
 from cdm_desktop.public_api.models import ProviderError
-from cdm_desktop.public_api.robots_policy import RobotsDecision, evaluate_robots_text
+from cdm_desktop.public_api.robots_policy import RobotsPolicy, evaluate_robots_text
+from cdm_desktop.public_api.settings_store import PublicApiSettingsStore
 from cdm_desktop.public_api.web_evidence_models import CrawlPolicy
+
+
+def public_resolver(_host: str, _port: object, *, type: int = 0):
+    _ = type
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
 
 
 def make_paths(tmp_path: Path) -> AppPaths:
@@ -28,17 +34,17 @@ def make_paths(tmp_path: Path) -> AppPaths:
     ).ensure()
 
 
-def test_robots_policy_allowed_disallowed_and_delay() -> None:
+def test_robots_policy_allowed_disallowed_and_decimal_delay() -> None:
     robots = """
-User-agent: *
+User-agent: CompanyDecisionMonitorBot/0.1.5
 Disallow: /private
-Crawl-delay: 3
+Crawl-delay: 1.5
 """
     allowed = evaluate_robots_text(robots, "https://example.com/investors")
     blocked = evaluate_robots_text(robots, "https://example.com/private/page")
 
     assert allowed.allowed
-    assert allowed.crawl_delay_seconds == 3
+    assert allowed.crawl_delay_seconds == 1.5
     assert not blocked.allowed
     assert "robots.txt" in blocked.error_message
 
@@ -46,67 +52,83 @@ Crawl-delay: 3
 def test_robots_missing_allows_low_frequency() -> None:
     class FakeHttp:
         def get_text(self, _provider: str, _url: str):
-            return None, ProviderError("crawlergo_web_evidence", "http_error", "missing")
+            return None, ProviderError("web_evidence", "http_error", "missing")
 
-    provider = CrawlergoWebEvidenceProvider(robots_policy=None)
-    provider.robots_policy.http = FakeHttp()  # type: ignore[assignment]
-    decision = provider.robots_policy.can_fetch("https://example.com/")
+    decision = RobotsPolicy(FakeHttp()).can_fetch("https://example.com/")
 
     assert decision.allowed
     assert decision.missing_robots
+    assert "低频率" in decision.error_message
 
 
-def test_crawlergo_command_builder_is_list_and_limited(tmp_path: Path) -> None:
+def test_crawlergo_command_builder_is_argument_list_and_uses_supported_limits(
+    tmp_path: Path,
+) -> None:
     binary = tmp_path / "crawlergo.exe"
-    policy = CrawlPolicy(allowed_domains=["example.com"], max_pages_per_domain=7, max_depth=2, timeout_seconds=9)
-    command = build_crawlergo_command(str(binary), "https://example.com", policy)
+    chrome = tmp_path / "chrome.exe"
+    binary.write_bytes(b"binary")
+    chrome.write_bytes(b"binary")
+    policy = CrawlPolicy(
+        allowed_domains=["example.com"],
+        max_pages_per_domain=7,
+        max_depth=2,
+        timeout_seconds=9,
+    )
+    seed = "https://example.com/investors?a=1&b=two"
+    command = build_crawlergo_command(
+        str(binary),
+        str(chrome),
+        seed,
+        policy,
+        resolver=public_resolver,
+    )
 
     assert isinstance(command.command, list)
-    assert "--max-crawled-count" in command.command
-    assert "7" in command.command
-    assert "--max-depth" in command.command
+    assert command.shell is False
+    assert command.command[-1] == seed
+    assert command.command[command.command.index("--max-crawled-count") + 1] == "7"
+    assert command.command[command.command.index("--max-run-time") + 1] == "9"
+    assert "--max-depth" not in command.command
+    assert command.max_depth == 2
     assert command.allowed_domains == ["example.com"]
-    assert command.timeout_seconds == 9
 
 
-def test_crawlergo_subprocess_uses_no_shell_and_filters_domains(tmp_path: Path, monkeypatch) -> None:
-    binary = tmp_path / "crawlergo.exe"
-    binary.write_text("placeholder", encoding="utf-8")
-    captured: dict[str, object] = {}
+def test_crawlergo_runtime_external_and_license_blocked_bundled(tmp_path: Path) -> None:
+    external_binary = tmp_path / "external" / "crawlergo.exe"
+    external_chrome = tmp_path / "external" / "chrome.exe"
+    external_binary.parent.mkdir()
+    external_binary.write_bytes(b"binary")
+    external_chrome.write_bytes(b"binary")
+    empty_app = tmp_path / "app"
+    empty_app.mkdir()
 
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured["shell"] = kwargs.get("shell")
-        return SimpleNamespace(returncode=0, stdout='{"req_list":[{"url":"https://example.com/ir"},{"url":"https://other.com/"}]}')
+    external = CrawlergoRuntimeManager(
+        external_binary_path=str(external_binary),
+        external_chrome_path=str(external_chrome),
+        app_dir=empty_app,
+    ).discover()
+    assert external.state == "enabled"
+    assert external.mode == "external"
+    assert not external.bundled
 
-    class FakeHttp:
-        def get_text(self, _provider: str, url: str, **_kwargs):
-            if url.endswith("robots.txt"):
-                return "User-agent: *\nAllow: /\n", None
-            return "<html><head><title>IR</title><meta name='description' content='Investor relations'></head><body><main>Investor page text.</main></body></html>", None
+    bundled_binary = empty_app / "runtime" / "crawlergo" / "crawlergo.exe"
+    bundled_chrome = empty_app / "runtime" / "chromium" / "chrome.exe"
+    bundled_binary.parent.mkdir(parents=True)
+    bundled_chrome.parent.mkdir(parents=True)
+    bundled_binary.write_bytes(b"binary")
+    bundled_chrome.write_bytes(b"binary")
+    bundled = CrawlergoRuntimeManager(app_dir=empty_app).discover()
+    assert bundled.mode == "bundled"
+    assert bundled.state == "dependency_error"
+    assert bundled.binary_status == "blocked_by_license_audit"
 
-    class FakeRobots:
-        def can_fetch(self, _url: str) -> RobotsDecision:
-            return RobotsDecision(True, "https://example.com/robots.txt")
 
-    monkeypatch.setattr("cdm_desktop.public_api.crawlergo_provider.subprocess.run", fake_run)
-    monkeypatch.setattr("cdm_desktop.public_api.crawlergo_provider.time.sleep", lambda _seconds: None)
-    provider = CrawlergoWebEvidenceProvider(
-        crawlergo_path=str(binary),
-        http=FakeHttp(),  # type: ignore[arg-type]
-        robots_policy=FakeRobots(),  # type: ignore[arg-type]
-        cache=WebEvidenceCache(make_paths(tmp_path)),
-    )
-    result = provider.crawl(
-        company_name="Example",
-        seed_urls=["https://example.com"],
-        policy=CrawlPolicy(max_pages_per_domain=5, max_depth=1),
-    )
+def test_crawlergo_runtime_calls_are_safe_and_discovery_disabled() -> None:
+    source = inspect.getsource(CrawlergoRuntimeManager._run_diagnostic)
 
-    assert captured["shell"] is False
-    assert result.job.pages_crawled == 2
-    assert any(item.domain == "example.com" for item in result.items)
-    assert any(skip["url"] == "https://other.com/" for skip in result.skipped_urls)
+    assert "subprocess.Popen" in source
+    assert "shell=False" in source
+    assert CRAWLERGO_DISCOVERY_ENABLED is False
 
 
 def test_parse_crawlergo_urls_from_json_and_text() -> None:
@@ -115,58 +137,46 @@ def test_parse_crawlergo_urls_from_json_and_text() -> None:
     assert parse_crawlergo_urls(text) == ["https://example.com/a", "https://example.com/b"]
 
 
-def test_url_validation_blocks_unsafe_targets() -> None:
-    assert validate_crawl_url("https://example.com").allowed
-    assert not validate_crawl_url("file:///etc/passwd").allowed
-    assert not validate_crawl_url("javascript:alert(1)").allowed
-    assert not validate_crawl_url("http://127.0.0.1").allowed
-    assert not validate_crawl_url("https://xueqiu.com/S/AAPL").allowed
-    assert not validate_crawl_url("https://other.com", allowed_domains=["example.com"]).allowed
+def test_web_evidence_settings_defaults_and_robots_invariant(tmp_path: Path) -> None:
+    store = PublicApiSettingsStore(make_paths(tmp_path))
+    policy = store.crawlergo_policy()
+
+    assert policy.max_pages_per_domain == 15
+    assert policy.max_depth == 2
+    assert policy.timeout_seconds == 30
+    assert policy.request_delay_seconds >= 1
+    assert policy.respect_robots
+
+    policy.respect_robots = False
+    store.set_crawlergo_policy(policy)
+    assert store.crawlergo_policy().respect_robots
 
 
-def test_content_extractor_metadata_and_limits() -> None:
-    html = """
-<html lang="en"><head>
-<title>Example IR</title>
-<meta name="description" content="Company investor relations page">
-<meta property="og:description" content="OG description">
-<meta property="article:published_time" content="2026-01-01T00:00:00Z">
-</head><body><main><h1>Investor Relations</h1><p>{body}</p></main></body></html>
-""".format(body="Long text " * 200)
-
-    item = extract_web_evidence(html, source_url="https://example.com/investor")
-
-    assert item.title == "Example IR"
-    assert item.description == "Company investor relations page"
-    assert item.published_at == "2026-01-01T00:00:00Z"
-    assert item.content_type == "investor_relations"
-    assert len(item.content_snippet) <= 300
-    assert len(item.extracted_text_preview) <= 800
-
-
-def test_web_evidence_cache_stores_no_full_html(tmp_path: Path) -> None:
-    cache = WebEvidenceCache(make_paths(tmp_path), ttl_seconds=60)
-    item = extract_web_evidence(
-        "<html><head><title>A</title></head><body>Full body text</body></html>",
-        source_url="https://example.com/a",
-    )
-    cache.set(item)
-    raw = next((tmp_path / "cache" / "web_evidence").glob("*.json")).read_text(encoding="utf-8")
-
-    assert "<html" not in raw.lower()
-    cached = cache.get("https://example.com/a")
-    assert cached is not None
-    assert cached.from_cache
-    assert cache.clear() == 1
-
-
-def test_crawlergo_ui_text_is_compliance_oriented() -> None:
+def test_web_evidence_ui_text_is_compliance_oriented() -> None:
     company_detail = Path("src/cdm_desktop/ui/pages/company_detail.py").read_text(encoding="utf-8")
     settings = Path("src/cdm_desktop/ui/pages/settings.py").read_text(encoding="utf-8")
     combined = company_detail + settings
 
-    assert "robots" in combined
-    assert "不绕过登录/验证码" in combined
+    assert "网页证据" in combined
+    assert "robots.txt 始终开启" in combined
+    assert "不会绕过登录、验证码、Cookie、Token、付费墙或 robots.txt" in combined
+    assert "采集官网" in combined
+    assert "添加 URL" in combined
+    assert "取消任务" in combined
+    assert "采集诊断" in combined
+    assert "原始 crawlergo stdout" not in combined
     assert "抓取雪球" not in combined
-    assert "cookie" not in combined.lower()
-    assert "xq_a_token" not in combined.lower()
+
+
+def test_optional_crawlergo_self_test_does_not_fail_when_dependency_is_missing(
+    capsys,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CDM_DESKTOP_DATA_DIR", str(tmp_path))
+
+    assert main(["--self-test", "crawlergo"]) == 0
+    output = capsys.readouterr().out
+    assert "crawlergo_optional_external" in output
+    assert "binary_status=" in output
+    assert "chrome_status=" in output

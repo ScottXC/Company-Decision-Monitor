@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
-from urllib.parse import urlparse, urlunparse
+from typing import Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -25,98 +27,249 @@ class FetchedUrl:
     status_code: int
 
 
-BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain"}
-METADATA_IP = ipaddress.ip_address("169.254.169.254")
+@dataclass(frozen=True)
+class ValidatedUrl:
+    url: str
+    hostname: str
+    resolved_ips: tuple[str, ...]
+
+
+Resolver = Callable[..., list[Any]]
+
+BLOCKED_HOSTNAMES = {
+    "localhost",
+    "localhost.localdomain",
+    "metadata",
+    "metadata.google.internal",
+    "instance-data",
+    "instance-data.ec2.internal",
+}
+METADATA_IPS = {
+    ipaddress.ip_address("169.254.169.254"),
+    ipaddress.ip_address("100.100.100.200"),
+    ipaddress.ip_address("fd00:ec2::254"),
+}
 ALLOWED_SCHEMES = {"http", "https"}
 
 
+class URLSafetyValidator:
+    def __init__(
+        self,
+        *,
+        resolver: Resolver | None = None,
+        allow_localhost_for_dev: bool = False,
+    ) -> None:
+        self.resolver = resolver or socket.getaddrinfo
+        self.allow_localhost_for_dev = allow_localhost_for_dev
+
+    def validate(self, url: str) -> ValidatedUrl:
+        raw_parsed = urlsplit((url or "").strip())
+        if raw_parsed.username is not None or raw_parsed.password is not None:
+            raise UnsafeUrlError("URL 不允许包含用户名或密码")
+        normalized = normalize_url(url)
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in ALLOWED_SCHEMES:
+            raise UnsafeUrlError("仅允许 http 或 https URL")
+        if not parsed.hostname:
+            raise UnsafeUrlError("URL 缺少主机名")
+        hostname = parsed.hostname.casefold().rstrip(".")
+        if not self.allow_localhost_for_dev and (
+            hostname in BLOCKED_HOSTNAMES or hostname.endswith(".localhost")
+        ):
+            raise UnsafeUrlError("不允许访问 localhost 或 metadata 主机")
+
+        try:
+            literal = ipaddress.ip_address(hostname)
+        except ValueError:
+            resolved = self._resolve(hostname)
+        else:
+            self._validate_ip(literal)
+            resolved = (str(literal),)
+        return ValidatedUrl(normalized, hostname, resolved)
+
+    def validate_peer_ip(self, ip_text: str) -> None:
+        try:
+            address = ipaddress.ip_address(ip_text.split("%", 1)[0])
+        except ValueError as exc:
+            raise UnsafeUrlError("无法验证实际连接 IP") from exc
+        self._validate_ip(address)
+
+    def _resolve(self, hostname: str) -> tuple[str, ...]:
+        try:
+            addresses = self.resolver(hostname, None, type=socket.SOCK_STREAM)
+        except (OSError, socket.gaierror) as exc:
+            raise UnsafeUrlError(f"无法解析主机名: {hostname}") from exc
+        if not addresses:
+            raise UnsafeUrlError(f"无法解析主机名: {hostname}")
+
+        resolved: list[str] = []
+        for address in addresses:
+            try:
+                ip_text = str(address[4][0]).split("%", 1)[0]
+                ip = ipaddress.ip_address(ip_text)
+            except (IndexError, TypeError, ValueError) as exc:
+                raise UnsafeUrlError(f"DNS 返回无法验证的地址: {hostname}") from exc
+            self._validate_ip(ip)
+            if str(ip) not in resolved:
+                resolved.append(str(ip))
+        return tuple(resolved)
+
+    def _validate_ip(self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+        if self.allow_localhost_for_dev and ip.is_loopback:
+            return
+        if ip in METADATA_IPS:
+            raise UnsafeUrlError("不允许访问云 metadata 服务地址")
+        if ip.is_loopback:
+            raise UnsafeUrlError("不允许访问 loopback 地址")
+        if ip.is_private:
+            raise UnsafeUrlError("不允许访问内网地址")
+        if ip.is_link_local:
+            raise UnsafeUrlError("不允许访问 link-local 地址")
+        if ip.is_unspecified:
+            raise UnsafeUrlError("不允许访问未指定地址")
+        if ip.is_multicast:
+            raise UnsafeUrlError("不允许访问 multicast 地址")
+        if ip.is_reserved or not ip.is_global:
+            raise UnsafeUrlError("不允许访问非公网地址")
+
+
 def normalize_url(url: str) -> str:
-    parsed = urlparse(url.strip())
-    if parsed.scheme and parsed.netloc:
-        scheme = parsed.scheme.lower()
-        netloc = parsed.netloc.lower()
-        return urlunparse((scheme, netloc, parsed.path or "/", "", parsed.query, ""))
-    return url.strip()
-
-
-def validate_url(url: str, *, resolver: object | None = None) -> str:
-    normalized = normalize_url(url)
-    parsed = urlparse(normalized)
-    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
-        raise UnsafeUrlError("仅允许 http 或 https URL")
-    if not parsed.hostname:
-        raise UnsafeUrlError("URL 缺少主机名")
-
-    hostname = parsed.hostname.lower().rstrip(".")
-    if hostname in BLOCKED_HOSTNAMES or hostname.endswith(".localhost"):
-        raise UnsafeUrlError("不允许访问 localhost")
-
+    raw = (url or "").strip()
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        return raw
+    scheme = parsed.scheme.casefold()
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
     try:
-        ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        _validate_resolved_hostname(hostname, resolver=resolver)
-    else:
-        _validate_ip(ip)
+        port = parsed.port
+    except ValueError as exc:
+        raise UnsafeUrlError("URL 端口无效") from exc
+    host_text = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = f"{host_text}:{port}" if port is not None else host_text
+    path = parsed.path or "/"
+    return urlunsplit((scheme, netloc, path, parsed.query, ""))
 
-    return normalized
+
+def validate_url(
+    url: str,
+    *,
+    resolver: Resolver | None = None,
+    allow_localhost_for_dev: bool = False,
+) -> str:
+    return URLSafetyValidator(
+        resolver=resolver,
+        allow_localhost_for_dev=allow_localhost_for_dev,
+    ).validate(url).url
 
 
-def safe_fetch_url(url: str, *, timeout_seconds: int = 15, max_bytes: int = 5_000_000) -> FetchedUrl:
-    checked_url = validate_url(url)
+def safe_fetch_url(
+    url: str,
+    *,
+    timeout_seconds: int = 15,
+    max_bytes: int = 5_000_000,
+    max_redirects: int = 5,
+    user_agent: str = "CompanyDecisionMonitorBot/0.1.5",
+    resolver: Resolver | None = None,
+    transport: httpx.BaseTransport | None = None,
+    allow_localhost_for_dev: bool = False,
+) -> FetchedUrl:
+    validator = URLSafetyValidator(
+        resolver=resolver,
+        allow_localhost_for_dev=allow_localhost_for_dev,
+    )
+    initial = validator.validate(url).url
+    current = initial
     timeout = httpx.Timeout(timeout_seconds, connect=timeout_seconds)
-    with httpx.Client(follow_redirects=True, timeout=timeout, trust_env=False) as client, client.stream(
-        "GET",
-        checked_url,
-        headers={"User-Agent": "CompanyDecisionMonitor/0.1"},
-    ) as response:
-        response.raise_for_status()
-        final_url = validate_url(str(response.url))
-        content_length = response.headers.get("content-length")
-        if content_length and int(content_length) > max_bytes:
-            raise FetchTooLargeError(f"响应内容超过限制: {max_bytes} bytes")
+    with httpx.Client(
+        follow_redirects=False,
+        timeout=timeout,
+        trust_env=False,
+        transport=transport,
+    ) as client:
+        for redirect_count in range(max_redirects + 1):
+            checked = validator.validate(current).url
+            request = client.build_request(
+                "GET",
+                checked,
+                headers={
+                    "User-Agent": user_agent,
+                    "Accept": "text/html,application/xhtml+xml,text/plain,application/pdf;q=0.5",
+                },
+            )
+            response = client.send(request, stream=True)
+            try:
+                _validate_response_peer(
+                    response,
+                    validator,
+                    required=transport is None,
+                )
+                if response.is_redirect:
+                    location = response.headers.get("location", "").strip()
+                    if not location:
+                        raise UnsafeUrlError("重定向响应缺少目标地址")
+                    if redirect_count >= max_redirects:
+                        raise UnsafeUrlError("重定向次数超过限制")
+                    current = validator.validate(urljoin(checked, location)).url
+                    continue
+                response.raise_for_status()
+                response_content_type = response.headers.get(
+                    "content-type", "application/octet-stream"
+                )
+                if "application/pdf" in response_content_type.casefold():
+                    return FetchedUrl(
+                        url=initial,
+                        final_url=validator.validate(str(response.url)).url,
+                        content_type=response_content_type,
+                        content=b"",
+                        status_code=response.status_code,
+                    )
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        declared_length = int(content_length)
+                    except ValueError:
+                        declared_length = 0
+                    if declared_length > max_bytes:
+                        raise FetchTooLargeError(f"响应内容超过限制: {max_bytes} bytes")
 
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in response.iter_bytes():
-            total += len(chunk)
-            if total > max_bytes:
-                raise FetchTooLargeError(f"响应内容超过限制: {max_bytes} bytes")
-            chunks.append(chunk)
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise FetchTooLargeError(f"响应内容超过限制: {max_bytes} bytes")
+                    chunks.append(chunk)
+                return FetchedUrl(
+                    url=initial,
+                    final_url=validator.validate(str(response.url)).url,
+                    content_type=response_content_type,
+                    content=b"".join(chunks),
+                    status_code=response.status_code,
+                )
+            finally:
+                response.close()
+    raise UnsafeUrlError("无法完成安全 URL 请求")
 
-        return FetchedUrl(
-            url=checked_url,
-            final_url=final_url,
-            content_type=response.headers.get("content-type", "application/octet-stream"),
-            content=b"".join(chunks),
-            status_code=response.status_code,
-        )
 
-
-def _validate_resolved_hostname(hostname: str, *, resolver: object | None = None) -> None:
-    resolve = resolver or socket.getaddrinfo
+def _validate_response_peer(
+    response: httpx.Response,
+    validator: URLSafetyValidator,
+    *,
+    required: bool,
+) -> None:
+    stream = response.extensions.get("network_stream")
+    if stream is None or not hasattr(stream, "get_extra_info"):
+        if required:
+            raise UnsafeUrlError("无法验证实际连接 IP，已安全终止请求")
+        return
     try:
-        addresses = resolve(hostname, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise UnsafeUrlError(f"无法解析主机名: {hostname}") from exc
-
-    if not addresses:
-        raise UnsafeUrlError(f"无法解析主机名: {hostname}")
-
-    for address in addresses:
-        ip_text = address[4][0]
-        _validate_ip(ipaddress.ip_address(ip_text))
-
-
-def _validate_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
-    if ip == METADATA_IP:
-        raise UnsafeUrlError("不允许访问云 metadata 服务地址")
-    if ip.is_loopback:
-        raise UnsafeUrlError("不允许访问 loopback 地址")
-    if ip.is_private:
-        raise UnsafeUrlError("不允许访问内网地址")
-    if ip.is_link_local:
-        raise UnsafeUrlError("不允许访问 link-local 地址")
-    if ip.is_unspecified:
-        raise UnsafeUrlError("不允许访问未指定地址")
-    if ip.is_multicast:
-        raise UnsafeUrlError("不允许访问 multicast 地址")
+        server_addr = stream.get_extra_info("server_addr")
+    except (OSError, RuntimeError) as exc:
+        if required:
+            raise UnsafeUrlError("无法验证实际连接 IP，已安全终止请求") from exc
+        return
+    if isinstance(server_addr, (tuple, list)) and server_addr:
+        validator.validate_peer_ip(str(server_addr[0]))
+        return
+    if required:
+        raise UnsafeUrlError("无法验证实际连接 IP，已安全终止请求")

@@ -97,7 +97,8 @@ def test_xueqiu_ui_text_is_compliance_oriented() -> None:
     assert "不抓取内容" in combined
     assert "雪球新闻已抓取" not in combined
     assert "正在同步雪球" not in combined
-    assert "cookie" not in combined.lower()
+    assert "xueqiu_cookie" not in combined.lower()
+    assert "xueqiu_token" not in combined.lower()
     assert "xq_a_token" not in combined.lower()
 
 

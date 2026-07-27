@@ -28,6 +28,8 @@ REQUIRED_ZIP_SUFFIXES = (
     SYMBOL_INDEX_SUFFIX,
     CHINA_HK_INDEX_SUFFIX,
     "third_party/licenses/AKShare_LICENSE.txt",
+    "third_party/licenses/BeautifulSoup_LICENSE.txt",
+    "third_party/licenses/lxml_LICENSE.txt",
     "sqlite3.dll",
     "_sqlite3.pyd",
     "cdm_desktop/ui/theme/light.qss",
@@ -40,6 +42,7 @@ FORBIDDEN_FILE_NAMES = {
     "public_api_settings.json",
     "watchlist.json",
     "cdm.db",
+    "web_evidence.sqlite",
 }
 
 FORBIDDEN_PATH_PARTS = {
@@ -116,6 +119,16 @@ def main() -> int:
         if not akshare_self_test["passed"]:
             failures.append(str(akshare_self_test["message"]))
         checks.append({"check": "frozen_akshare_self_test", "status": "passed" if akshare_self_test["passed"] else "failed", **akshare_self_test})
+        crawlergo_self_test = _run_crawlergo_self_test(EXE)
+        if not crawlergo_self_test["passed"]:
+            failures.append(str(crawlergo_self_test["message"]))
+        checks.append(
+            {
+                "check": "frozen_crawlergo_optional_self_test",
+                "status": "passed" if crawlergo_self_test["passed"] else "failed",
+                **crawlergo_self_test,
+            }
+        )
 
     dist_root = DIST / "CompanyDecisionMonitor"
     if dist_root.exists():
@@ -128,7 +141,7 @@ def main() -> int:
     checks.append({"check": "installer_script_references", "status": "passed" if not installer_failures else "failed", "failures": installer_failures})
 
     report = {
-        "version": "v0.1.4-generalized-search-performance-rc1",
+        "version": "v0.1.5",
         "checks": checks,
         "failures": failures,
         "artifacts": {
@@ -172,6 +185,8 @@ def _validate_portable_zip(path: Path) -> list[str]:
                 failures.append(f"Portable ZIP contains forbidden path part: {name}")
             if _looks_like_crawlergo_binary(normalized):
                 failures.append(f"Portable ZIP contains crawlergo binary, which is not bundled by default: {name}")
+            if _looks_like_bundled_browser(normalized):
+                failures.append(f"Portable ZIP contains a bundled browser runtime: {name}")
             if file_name.endswith((".log", ".db", ".sqlite", ".sqlite3")) and not normalized.endswith((SYMBOL_INDEX_SUFFIX, CHINA_HK_INDEX_SUFFIX)):
                 failures.append(f"Portable ZIP contains runtime data file: {name}")
     return failures
@@ -194,6 +209,8 @@ def _validate_dist_tree(path: Path) -> list[str]:
         relative = file_path.relative_to(path).as_posix()
         if _looks_like_crawlergo_binary(relative):
             failures.append(f"Dist contains crawlergo binary, which is not bundled by default: {file_path}")
+        if _looks_like_bundled_browser(relative):
+            failures.append(f"Dist contains a bundled browser runtime: {file_path}")
         if file_path.suffix.lower() in {".db", ".sqlite", ".sqlite3"} and not relative.endswith((SYMBOL_INDEX_SUFFIX, CHINA_HK_INDEX_SUFFIX)):
             failures.append(f"Dist contains runtime database/cache file: {file_path}")
         if file_path.suffix.lower() in {".pyc", ".pyo"}:
@@ -213,6 +230,12 @@ def _validate_dist_tree(path: Path) -> list[str]:
 def _looks_like_crawlergo_binary(path: str) -> bool:
     name = Path(path).name.lower()
     return name in {"crawlergo.exe", "crawlergo"} or (name.startswith("crawlergo") and name.endswith(".exe"))
+
+
+def _looks_like_bundled_browser(path: str) -> bool:
+    normalized = path.replace("\\", "/").casefold()
+    name = Path(normalized).name
+    return name in {"chrome.exe", "chromium.exe"} or "/runtime/chromium/" in normalized
 
 
 def _validate_installer_script(path: Path) -> list[str]:
@@ -314,6 +337,39 @@ def _run_akshare_self_test(exe_path: Path) -> dict[str, Any]:
     return {
         "passed": passed,
         "message": "AKShare self-test passed" if passed else f"AKShare self-test failed with exit code {completed.returncode}",
+        "returncode": completed.returncode,
+        "stdout": stdout[-2000:],
+        "stderr": (completed.stderr or "")[-2000:],
+    }
+
+
+def _run_crawlergo_self_test(exe_path: Path) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            [str(exe_path), "--self-test", "crawlergo"],
+            cwd=exe_path.parent,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "passed": False,
+            "message": f"crawlergo optional self-test could not run: {exc}",
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(exc),
+        }
+    stdout = (completed.stdout or "").strip()
+    passed = completed.returncode == 0 and "crawlergo_optional_external" in stdout
+    return {
+        "passed": passed,
+        "message": (
+            "crawlergo optional runtime status reported"
+            if passed
+            else f"crawlergo optional self-test failed with exit code {completed.returncode}"
+        ),
         "returncode": completed.returncode,
         "stdout": stdout[-2000:],
         "stderr": (completed.stderr or "")[-2000:],

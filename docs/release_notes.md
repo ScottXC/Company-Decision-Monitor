@@ -1,5 +1,25 @@
 # Release Notes
 
+## v0.1.5
+
+- Added a user-triggered **网页证据** tab to company details with official-site collection, manual URL entry, refresh, cancellation, per-item deletion, company-level cleanup, content viewing, and collapsed diagnostics.
+- Added redirect-aware public-URL validation with DNS and connected-peer IP checks, private/metadata address blocking, embedded-credential rejection, same-domain scope, bounded redirects, and a production-disabled localhost development flag.
+- Added mandatory robots.txt evaluation, parsed crawl delay, a clear blocked-page state, and the explicit `CompanyDecisionMonitorBot/0.1.5` user agent.
+- Added a separate two-worker crawl pool, per-domain serialization, cancellable delay waits, page/depth/time/content limits, and safe application-shutdown cancellation without using search workers.
+- Added Beautiful Soup/lxml extraction for metadata, Open Graph, headings, links, cleaned paragraphs, selected JSON-LD types, Organization fields, deterministic content types, snippets, and content hashes.
+- Added official-domain full cleaned-text display, third-party excerpt-only storage, and PDF metadata-only handling without PDF body download or parsing.
+- Added independent AppData `web_evidence.sqlite` storage with crawl jobs, evidence, links, errors, metadata, profile candidates, canonical/content-hash deduplication, TTL, delete/clear operations, and corruption preservation/rebuild.
+- Added traceable `ProfileFieldCandidate` handling. Only high-confidence, conflict-free official JSON-LD Organization fields can fill an empty profile field automatically; conflicts remain pending.
+- Added `CrawlergoRuntimeManager` discovery for bundled/system/external modes and a frozen optional-runtime self-test. Crawlergo and Chromium remain unbundled, and active crawlergo discovery is disabled because the audited upstream CLI cannot disable form submission and DOM-event triggering.
+- Preserved the Xueqiu external-link-only boundary and hard-blocked Xueqiu from Web Evidence.
+- Added offline regression tests for URL/SSRF safety, redirects, DNS rebinding, robots, extraction, storage recovery/deduplication, candidates, lifecycle, UI, runtime diagnostics, and compliance.
+
+### Boundaries
+
+- No search provider, symbol-index record, search algorithm, company alias, AI/RAG feature, risk engine, or report export was added.
+- No login, Cookie, Token, CAPTCHA, paywall, form submission, browser-profile import, or anti-bot bypass workflow is supported.
+- JavaScript-only pages can remain incomplete; PDF body extraction and active browser crawling are deferred.
+
 ## v0.1.4-generalized-search-performance-rc1
 
 - Froze the generalized local-first search architecture for release-candidate validation.

@@ -42,6 +42,11 @@ ProviderState = Literal[
     "dependency_missing",
     "index_missing",
     "index_corrupted",
+    "unsafe_url",
+    "response_too_large",
+    "network_error",
+    "robots_blocked",
+    "cancelled",
 ]
 
 
@@ -286,9 +291,10 @@ class ExternalSourceLink:
 
 @dataclass
 class CompanyProfile:
-    schema_version: int = 4
+    schema_version: int = 5
     id: str = ""
     display_name: str = ""
+    official_name: str = ""
     legal_name: str = ""
     short_name: str = ""
     aliases: list[str] = field(default_factory=list)
@@ -312,6 +318,8 @@ class CompanyProfile:
     wikidata_id: str = ""
     wikipedia_url: str = ""
     website: str = ""
+    investor_relations_url: str = ""
+    press_release_url: str = ""
     official_source_url: str = ""
     source_urls: list[str] = field(default_factory=list)
     description: str = ""
@@ -340,6 +348,7 @@ class CompanyProfile:
     image_url: str = ""
     listing_date: str = ""
     ipo_date: str = ""
+    founding_date: str = ""
     is_etf: bool | None = None
     is_actively_trading: bool | None = None
     is_adr: bool | None = None
