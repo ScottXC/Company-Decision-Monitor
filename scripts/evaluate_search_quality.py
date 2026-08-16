@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from cdm_desktop import RELEASE_LABEL
 from cdm_desktop.public_api.search_service import PublicSearchService
 from scripts.search_quality_lib import case_hit, load_search_cases, offline_search
 
@@ -99,7 +100,7 @@ def _report(mode: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     passed = sum(1 for row in rows if row["passed"])
     failed = total - passed
     return {
-        "version": "v0.1.5",
+        "version": RELEASE_LABEL,
         "app_mode": "Open-Source Data Mode",
         "mode": mode,
         "open_source_provider_availability": _open_source_provider_availability(),

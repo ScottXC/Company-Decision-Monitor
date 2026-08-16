@@ -18,6 +18,7 @@ if str(SRC) not in sys.path:
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from cdm_desktop import RELEASE_LABEL  # noqa: E402
 from cdm_desktop.paths import AppPaths  # noqa: E402
 from cdm_desktop.public_api.models import SearchResponse, SearchTiming  # noqa: E402
 from cdm_desktop.public_api.providers import SYMBOL_UNIVERSE_PATH  # noqa: E402
@@ -156,7 +157,7 @@ def main() -> int:
 
         shutdown_clean = page.shutdown(wait_ms=1000)
         report = {
-            "version": "v0.1.5",
+            "version": RELEASE_LABEL,
             "passed": all(item["pass"] for item in sequence_reports)
             and shutdown_clean
             and peak_active_threads <= MAX_SEARCH_WORKER_THREADS

@@ -12,6 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from cdm_desktop import RELEASE_LABEL
 from cdm_desktop.paths import get_app_paths
 from cdm_desktop.public_api.cache import ApiCache
 from cdm_desktop.public_api.http_client import PublicHttpClient
@@ -100,7 +101,7 @@ def main() -> int:
         _run_provider_checks(provider_id, provider, results, masked)
 
     report = {
-        "version": "v0.1.5",
+        "version": RELEASE_LABEL,
         "mode": "Open-Source Data Mode",
         "search_samples": SEARCH_SAMPLES,
         "results": results,

@@ -290,6 +290,8 @@ def _pyinstaller_command(root: Path) -> list[str]:
             str(root / "THIRD_PARTY_NOTICES.md") + ";.",
             "--add-data",
             str(root / "third_party" / "licenses") + ";third_party/licenses",
+            "--add-data",
+            str(root / "release_metadata.json") + ";.",
             str(root / "src" / "cdm_desktop" / "main.py"),
         ]
     )
@@ -347,6 +349,7 @@ def _verify_pyinstaller_output(dist_app_dir: Path, exe_path: Path) -> None:
         dist_app_dir / "_internal" / "third_party" / "licenses" / "AKShare_LICENSE.txt",
         dist_app_dir / "_internal" / "third_party" / "licenses" / "BeautifulSoup_LICENSE.txt",
         dist_app_dir / "_internal" / "third_party" / "licenses" / "lxml_LICENSE.txt",
+        dist_app_dir / "_internal" / "release_metadata.json",
         dist_app_dir / "_internal" / "sqlite3.dll",
         dist_app_dir / "_internal" / "_sqlite3.pyd",
     ]

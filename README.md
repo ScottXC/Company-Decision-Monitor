@@ -7,7 +7,9 @@ Current version: `v0.1.5`
 
 Current mode: `Open-Source Data Mode`
 
-Release type: `Development build`
+Release type: `Stable Release`
+
+Base package version: `0.1.5`
 
 Company Decision Monitor is a Windows desktop application for company research and corporate activity monitoring. In `Open-Source Data Mode`, normal users do not need to apply for API keys, install Python, run `pip install`, download open-source projects, or import local company files. The installer bundles the runtime dependencies and a generated open-source symbol index for company search, symbol metadata, entity fallback, RSS news fallback, and local watchlist refresh.
 
@@ -22,6 +24,16 @@ Every target and redirect passes public-IP/SSRF validation and mandatory robots.
 Evidence is stored in an independent user AppData `web_evidence.sqlite`, not in either bundled symbol index and not in release artifacts. Official-domain JSON-LD Organization fields can create traceable profile candidates; only high-confidence, conflict-free values can fill an empty profile field automatically. Third-party content is never auto-applied.
 
 Crawlergo and Chromium are **not bundled**. Settings can detect bundled/system/external paths and test an optional external runtime, but v0.1.5 production collection uses a bounded GET-only pipeline. Active crawlergo discovery is disabled because the audited upstream CLI cannot disable form submission and DOM-event triggering. See [Web Evidence architecture and limitations](docs/web_evidence.md).
+
+### v0.1.5 known limitations
+
+- JavaScript-only pages may provide metadata without extractable body text.
+- PDF bodies are not parsed in v0.1.5.
+- Public no-key data remains best-effort.
+- Fake-IP/TUN networks may be rejected by the SSRF layer.
+- Crawlergo and Chromium are not bundled, and active crawlergo discovery is disabled.
+- AI/RAG, automated risk scoring, and report generation are not included.
+- The installer package passed automated build and artifact validation. A full elevated install/uninstall lifecycle was not manually executed by the maintainer for this release; this is an explicitly accepted residual risk, not a passed manual test.
 
 ## v0.1.4 generalized search performance
 
@@ -447,6 +459,8 @@ Please report bugs, provider problems, installation issues, and feature requests
 
 当前版本：`v0.1.5`
 当前模式：`Open-Source Data Mode`
+发布类型：`Stable Release`
+基础包版本：`0.1.5`
 
 Company Decision Monitor 是面向普通用户的公司研究与企业动态监控 Windows 桌面软件。当前版本默认不要求普通用户申请任何 API key，不要求安装 Python，不要求手动 `pip install`，也不要求导入 Excel、CSV 或本地公司数据库；安装包会内置运行依赖和开源 symbol universe 索引。
 
@@ -461,6 +475,16 @@ Company Decision Monitor 是面向普通用户的公司研究与企业动态监�
 网页证据存放在用户 AppData 的独立 `web_evidence.sqlite`，不会修改两套内置证券索引，也不会进入 EXE、Portable ZIP 或 Installer。官网 JSON-LD Organization 字段会生成可追踪候选；只有当前字段为空、没有冲突且置信度足够高时才会自动采用，第三方字段不会自动写入公司档案。
 
 本版本不内置 crawlergo 或 Chromium。设置页可以检测 bundled/system/external 状态并测试用户自行配置的外部运行时，但正式采集采用受限 GET-only 管线；原因是已审计的上游 crawlergo CLI 无法关闭表单提交和 DOM 事件触发。完整架构和限制见 [docs/web_evidence.md](docs/web_evidence.md)。
+
+### v0.1.5 已知限制
+
+- 主要依赖 JavaScript 的页面可能只能提供元数据，无法提取正文。
+- v0.1.5 不解析 PDF 正文。
+- 公开无 key 数据源仍是 best-effort。
+- fake-IP/TUN 网络可能被 SSRF 安全层拒绝。
+- 不内置 crawlergo 或 Chromium，主动 crawlergo discovery 保持禁用。
+- 不包含 AI/RAG、自动风险评分或报告生成。
+- Windows 安装包已通过自动构建和发布工件验证，但维护者未在本版本发布前执行完整的管理员权限安装/启动/卸载人工流程；这是明确接受的 residual risk，不是人工测试通过。
 
 ## v0.1.3 公司资料完整度
 

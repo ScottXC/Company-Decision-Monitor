@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy import delete
 
-from cdm_desktop import PRODUCT_NAME_ZH, __version__
+from cdm_desktop import PRODUCT_NAME_ZH, RELEASE_LABEL, RELEASE_TYPE, __version__
 from cdm_desktop.db import DatabaseManager
 from cdm_desktop.db.models import OnlineProviderCache, OnlineSearchResult, RecentSearch
 from cdm_desktop.db.repositories import SettingsRepository, SourceRepository
@@ -221,7 +221,9 @@ class SettingsPage(QWidget):
         text = QTextEdit()
         text.setReadOnly(True)
         text.setPlainText(
-            f"版本：{__version__}\n\n"
+            f"发布标签：{RELEASE_LABEL}\n"
+            f"基础版本：{__version__}\n"
+            f"发布类型：{RELEASE_TYPE}\n\n"
             "本软件仅用于信息监测和研究，不提供投资建议。\n"
             "所有数据保存在本机 SQLite 数据库中，不需要云账号或服务器。"
         )

@@ -8,6 +8,8 @@ class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CDM_", extra="ignore")
 
     app_version: str = "0.1.5"
+    release_label: str = "v0.1.5"
+    release_type: str = "Stable Release"
     app_mode: str = "Open-Source Data Mode"
     app_user_agent: str = "CompanyDecisionMonitor/0.1.5"
     request_timeout_seconds: int = Field(default=15, ge=1, le=120)

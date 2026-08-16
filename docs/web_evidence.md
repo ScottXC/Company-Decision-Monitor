@@ -1,6 +1,6 @@
 # Web Evidence
 
-Version scope: `v0.1.5`
+Version scope: package `0.1.5`; stable release `v0.1.5`
 
 ## Positioning
 

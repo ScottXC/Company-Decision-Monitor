@@ -25,7 +25,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from cdm_desktop import APP_MODE_LABEL, PRODUCT_NAME_ZH, __version__
+from cdm_desktop import (
+    APP_MODE_LABEL,
+    PRODUCT_NAME_ZH,
+    RELEASE_LABEL,
+    RELEASE_TYPE,
+    __version__,
+)
 from cdm_desktop.paths import AppPaths
 from cdm_desktop.public_api.cache import ApiCache
 from cdm_desktop.public_api.crawlergo_runtime import (
@@ -464,7 +470,9 @@ class SettingsPage(QWidget):
         panel, panel_layout = self._compact_panel("应用信息")
         fields = [
             ("应用名称", PRODUCT_NAME_ZH),
-            ("版本", f"v{__version__}"),
+            ("发布标签", RELEASE_LABEL),
+            ("基础版本", __version__),
+            ("发布类型", RELEASE_TYPE),
             ("模式", APP_MODE_LABEL),
             ("质量标记", "v0.1.5 Web Evidence"),
             ("真实业务边界", "不提供投资建议，不提供交易、买卖、下单、目标价或收益预测。"),

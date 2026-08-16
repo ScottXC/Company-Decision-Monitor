@@ -14,6 +14,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from cdm_desktop import RELEASE_LABEL  # noqa: E402
 from cdm_desktop.paths import AppPaths  # noqa: E402
 from cdm_desktop.public_api.models import SearchResponse  # noqa: E402
 from cdm_desktop.public_api.providers import SYMBOL_UNIVERSE_PATH  # noqa: E402
@@ -123,7 +124,7 @@ def run_benchmark(*, measure_public: bool = False, cache_bypass: bool = True) ->
         for rank in (1, 3, 5)
     }
     return {
-        "version": "v0.1.5",
+        "version": RELEASE_LABEL,
         "benchmark_type": "known_regression_cases",
         "cache_bypass_requested": cache_bypass,
         "passed": all(checks.values()),

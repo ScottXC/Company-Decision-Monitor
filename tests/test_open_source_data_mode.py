@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
 
-from cdm_desktop import APP_MODE_LABEL, __version__
+from cdm_desktop import APP_MODE_LABEL, RELEASE_LABEL, RELEASE_TYPE, __version__
+from cdm_desktop.config import AppConfig
 from cdm_desktop.paths import AppPaths
 from cdm_desktop.public_api.key_store import ApiKeyStore
 from cdm_desktop.public_api.providers import (
@@ -34,7 +36,32 @@ def make_paths(tmp_path: Path) -> AppPaths:
 
 def test_open_source_data_mode_labels() -> None:
     assert __version__ == "0.1.5"
+    assert RELEASE_LABEL == "v0.1.5"
+    assert RELEASE_TYPE == "Stable Release"
     assert APP_MODE_LABEL == "Open-Source Data Mode"
+
+
+def test_final_release_identity_is_consistent_across_package_and_delivery_files() -> None:
+    config = AppConfig()
+    metadata = json.loads(Path("release_metadata.json").read_text(encoding="utf-8"))
+    installer = Path("installer/CompanyDecisionMonitor.iss").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    build_script = Path("scripts/build_windows.py").read_text(encoding="utf-8")
+
+    assert config.app_version == __version__
+    assert config.release_label == RELEASE_LABEL
+    assert config.release_type == RELEASE_TYPE
+    assert metadata == {
+        "package_version": __version__,
+        "release_label": RELEASE_LABEL,
+        "release_type": RELEASE_TYPE,
+        "mode": APP_MODE_LABEL,
+    }
+    assert '#define AppVersion "0.1.5"' in installer
+    assert f'#define AppVersionName "{RELEASE_LABEL}"' in installer
+    assert f'VERSION_NAME = "{RELEASE_LABEL}"' in build_script
+    assert f"Current version: `{RELEASE_LABEL}`" in readme
+    assert "Release type: `Stable Release`" in readme
 
 
 def test_advanced_api_providers_default_disabled(tmp_path: Path) -> None:

@@ -2,6 +2,62 @@
 
 ## v0.1.5
 
+Release type: Stable Release.
+Package version: `0.1.5`.
+Final freeze validation date: 2026-08-16.
+
+### Security freeze
+
+- Moved allowed-domain and blocked-domain checks into the URL validator used before every GET and every redirect hop. A redirect from an allowed site to Xueqiu or another out-of-scope domain is now rejected before the second request.
+- Applied the same redirect scope to `robots.txt`; unsafe or oversized robots targets fail closed, while an absent or normally unreachable robots file retains the documented low-frequency fallback.
+- Confirmed public-IP validation, connected-peer IP checking, private/link-local/metadata blocking, embedded-credential rejection, production-disabled localhost access, GET-only requests, fixed User-Agent, ignored caller headers, and no Cookie/Authorization/token transport.
+- Preserved accepted/rejected profile-candidate decisions across rediscovery. A rejected field is not silently auto-applied on a later crawl.
+- Snapshotted the company profile when a crawl starts so changing the visible company cannot apply an earlier company's evidence to the new profile.
+- Hardened cleaned-text extraction for real pages containing nested removable navigation or consent elements.
+
+### Automated validation
+
+- `ruff check src tests scripts`: passed.
+- `pytest`: 233 passed.
+- `python -m compileall src scripts`: passed.
+- Web Evidence focused safety/extraction/storage/service/UI/runtime suite: 81 passed.
+- `build.bat`: passed; onedir EXE, Portable ZIP, and Inno Setup Installer were rebuilt.
+- Release artifact validation: passed, including onedir/Portable SQLite and FTS5 tests, sensitive-data checks, licenses, and stable-release metadata.
+- Frozen SQLite self-test: passed with SQLite 3.53.2, FTS5, n-gram, schema, exact/prefix/alias, and bundled-index checks.
+- Frozen AKShare self-test: passed with AKShare 1.18.64 and no network call.
+- Frozen crawlergo self-test: passed as `crawlergo_optional_external`, `configured=false`, `discovery_enabled=false`.
+
+### Search and profile regression
+
+- Known search benchmark: passed all 21 cases.
+- 450-case unseen benchmark: cold-query p95 73.322 ms; warm-query p95 68.376 ms; cache-hit p95 0.275 ms; local-first p95 73.322 ms.
+- Recall@1/@3/@5: 93.75% / 95.75% / 96.75%; ticker recall@1: 100%; maximum shortlist: 100.
+- Rapid-switch stress: passed; stale results were cancelled/discarded, worker pools returned idle, and search triggered zero profile/news calls.
+- Simulated-offline search: passed with local results preserved and zero ordinary-search news items.
+- Local profile coverage: 22/22 cases passed.
+
+### Public-site smoke
+
+- A bounded real-site smoke used Apple homepage, Investor Relations, and Newsroom seeds. Each seed used one page, depth zero, a one-second configured delay, a 30-second total timeout, mandatory robots evaluation, and a temporary AppData directory.
+- All three robots policies allowed collection and all three final pages returned HTTP 200.
+- Homepage extraction returned HTTP 200, title `Apple`, 1,768 cleaned-text characters, a 172-character snippet, and completed in 2.196 seconds.
+- Investor Relations redirected to its public default page and returned metadata successfully; its current JavaScript-oriented HTML yielded no cleaned body.
+- Newsroom returned HTTP 200, title `Newsroom`, a short extracted body, and metadata. Pre-cancelled lifecycle verification returned `cancelled`.
+- The native machine resolver maps public domains into the reserved `198.18.0.0/15` fake-IP range. The production SSRF policy correctly rejected that environment. The successful smoke used a process-local public-DNS override only for validation; no product rule or packaged setting was relaxed.
+
+### Final release gate and limitations
+
+- Installer: The Windows installer successfully passed automated build and release-artifact validation. A complete elevated install/uninstall lifecycle was not manually executed by the maintainer before this release.
+- Windows 安装包已通过自动构建和发布工件验证，但维护者未在本版本发布前执行完整的管理员权限安装/启动/卸载人工流程。
+- This is an explicitly accepted residual release risk, not a passed manual test. The unchecked lifecycle items remain recorded in `docs/manual_qa_checklist_v0.1.5.md` for post-release issue reproduction.
+- Fake-IP DNS/TUN environments are fail-closed and may require a network configuration that exposes verifiable public peer addresses.
+- JavaScript-only pages can provide metadata but little or no cleaned text.
+- Crawlergo and Chromium remain unbundled; active crawlergo discovery remains disabled.
+- PDF body extraction, AI/RAG, risk scoring, and report export remain out of scope.
+- Final Git, Tag, and GitHub Release operations are performed only after all non-waived automated final-commit gates pass.
+
+### Web Evidence product scope
+
 - Added a user-triggered **网页证据** tab to company details with official-site collection, manual URL entry, refresh, cancellation, per-item deletion, company-level cleanup, content viewing, and collapsed diagnostics.
 - Added redirect-aware public-URL validation with DNS and connected-peer IP checks, private/metadata address blocking, embedded-credential rejection, same-domain scope, bounded redirects, and a production-disabled localhost development flag.
 - Added mandatory robots.txt evaluation, parsed crawl delay, a clear blocked-page state, and the explicit `CompanyDecisionMonitorBot/0.1.5` user agent.

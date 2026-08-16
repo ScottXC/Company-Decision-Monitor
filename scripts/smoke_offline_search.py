@@ -13,6 +13,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from cdm_desktop import RELEASE_LABEL  # noqa: E402
 from cdm_desktop.paths import AppPaths  # noqa: E402
 from cdm_desktop.public_api.china_hk_index import CHINA_HK_INDEX_PATH  # noqa: E402
 from cdm_desktop.public_api.models import ProviderError  # noqa: E402
@@ -56,7 +57,7 @@ def main() -> int:
         )
         xueqiu = build_xueqiu_external_link(symbol="AAPL", company_name="Apple", market="US")
         report = {
-            "version": "v0.1.5",
+            "version": RELEASE_LABEL,
             "mode": "simulated_offline_no_network_calls",
             "temporary_appdata": True,
             "cases": results,

@@ -18,6 +18,14 @@ REPORTS = ROOT / "reports"
 REPORT_PATH = REPORTS / "release_artifact_report.json"
 SYMBOL_INDEX_SUFFIX = "cdm_desktop/resources/symbol_universe/symbol_universe.sqlite"
 CHINA_HK_INDEX_SUFFIX = "cdm_desktop/resources/china_hk_symbols/china_hk_symbols.sqlite"
+RELEASE_METADATA_SUFFIX = "release_metadata.json"
+RELEASE_LABEL = "v0.1.5"
+EXPECTED_RELEASE_METADATA = {
+    "package_version": "0.1.5",
+    "release_label": RELEASE_LABEL,
+    "release_type": "Stable Release",
+    "mode": "Open-Source Data Mode",
+}
 
 REQUIRED_ZIP_SUFFIXES = (
     "CompanyDecisionMonitor.exe",
@@ -30,6 +38,7 @@ REQUIRED_ZIP_SUFFIXES = (
     "third_party/licenses/AKShare_LICENSE.txt",
     "third_party/licenses/BeautifulSoup_LICENSE.txt",
     "third_party/licenses/lxml_LICENSE.txt",
+    RELEASE_METADATA_SUFFIX,
     "sqlite3.dll",
     "_sqlite3.pyd",
     "cdm_desktop/ui/theme/light.qss",
@@ -141,7 +150,7 @@ def main() -> int:
     checks.append({"check": "installer_script_references", "status": "passed" if not installer_failures else "failed", "failures": installer_failures})
 
     report = {
-        "version": "v0.1.5",
+        "version": RELEASE_LABEL,
         "checks": checks,
         "failures": failures,
         "artifacts": {
@@ -175,6 +184,18 @@ def _validate_portable_zip(path: Path) -> list[str]:
         for required in REQUIRED_ZIP_SUFFIXES:
             if not any(name.endswith(required) for name in normalized_names):
                 failures.append(f"Portable ZIP does not contain required bundled file: {required}")
+        metadata_names = [
+            name
+            for name, normalized in zip(names, normalized_names, strict=True)
+            if normalized.endswith(RELEASE_METADATA_SUFFIX)
+        ]
+        if len(metadata_names) == 1:
+            try:
+                metadata = json.loads(archive.read(metadata_names[0]).decode("utf-8"))
+            except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                failures.append(f"Portable release metadata is unreadable: {exc}")
+            else:
+                failures.extend(_release_metadata_failures(metadata, "Portable ZIP"))
         for name in names:
             normalized = name.replace("\\", "/")
             parts = {part.lower() for part in Path(normalized).parts}
@@ -198,6 +219,18 @@ def _validate_dist_tree(path: Path) -> list[str]:
     for required in REQUIRED_ZIP_SUFFIXES:
         if not any(item.endswith(required) for item in existing):
             failures.append(f"Dist does not contain required bundled file: {required}")
+    metadata_matches = [
+        file_path
+        for file_path in path.rglob(RELEASE_METADATA_SUFFIX)
+        if file_path.is_file()
+    ]
+    if len(metadata_matches) == 1:
+        try:
+            metadata = json.loads(metadata_matches[0].read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            failures.append(f"Dist release metadata is unreadable: {exc}")
+        else:
+            failures.extend(_release_metadata_failures(metadata, "Dist"))
     for file_path in path.rglob("*"):
         if not file_path.is_file():
             continue
@@ -230,6 +263,16 @@ def _validate_dist_tree(path: Path) -> list[str]:
 def _looks_like_crawlergo_binary(path: str) -> bool:
     name = Path(path).name.lower()
     return name in {"crawlergo.exe", "crawlergo"} or (name.startswith("crawlergo") and name.endswith(".exe"))
+
+
+def _release_metadata_failures(metadata: object, source: str) -> list[str]:
+    if not isinstance(metadata, dict):
+        return [f"{source} release metadata is not a JSON object"]
+    return [
+        f"{source} release metadata mismatch for {key}: {metadata.get(key)!r}"
+        for key, expected in EXPECTED_RELEASE_METADATA.items()
+        if metadata.get(key) != expected
+    ]
 
 
 def _looks_like_bundled_browser(path: str) -> bool:

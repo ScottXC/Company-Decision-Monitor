@@ -17,6 +17,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from cdm_desktop import RELEASE_LABEL  # noqa: E402
 from cdm_desktop.paths import AppPaths  # noqa: E402
 from cdm_desktop.public_api.china_hk_index import CHINA_HK_INDEX_PATH  # noqa: E402
 from cdm_desktop.public_api.providers import SYMBOL_UNIVERSE_PATH  # noqa: E402
@@ -122,7 +123,7 @@ def run_benchmark() -> dict[str, Any]:
         "shortlist_bounded": summary["max_shortlist"] <= 200,
     }
     return {
-        "version": "v0.1.5",
+        "version": RELEASE_LABEL,
         "random_seed": RANDOM_SEED,
         "passed": all(checks.values()),
         "checks": checks,
