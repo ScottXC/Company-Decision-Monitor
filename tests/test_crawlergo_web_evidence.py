@@ -51,7 +51,7 @@ Crawl-delay: 1.5
 
 def test_robots_missing_allows_low_frequency() -> None:
     class FakeHttp:
-        def get_text(self, _provider: str, _url: str):
+        def get_text(self, _provider: str, _url: str, **_kwargs):
             return None, ProviderError("web_evidence", "http_error", "missing")
 
     decision = RobotsPolicy(FakeHttp()).can_fetch("https://example.com/")
@@ -59,6 +59,35 @@ def test_robots_missing_allows_low_frequency() -> None:
     assert decision.allowed
     assert decision.missing_robots
     assert "低频率" in decision.error_message
+
+
+def test_robots_cache_uses_one_get_and_unsafe_redirect_fails_closed() -> None:
+    class FakeHttp:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_text(self, _provider: str, _url: str, **_kwargs):
+            self.calls += 1
+            return "User-agent: *\nAllow: /", None
+
+    fake = FakeHttp()
+    policy = RobotsPolicy(fake)
+    assert policy.can_fetch("https://example.com/a").allowed
+    assert policy.can_fetch("https://example.com/b").allowed
+    assert fake.calls == 1
+
+    class UnsafeRedirectHttp:
+        def get_text(self, _provider: str, _url: str, **_kwargs):
+            return None, ProviderError(
+                "web_evidence",
+                "unsafe_url",
+                "该域名被安全策略禁止采集",
+                retryable=False,
+            )
+
+    decision = RobotsPolicy(UnsafeRedirectHttp()).can_fetch("https://example.com/")
+    assert not decision.allowed
+    assert "不安全" in decision.error_message
 
 
 def test_crawlergo_command_builder_is_argument_list_and_uses_supported_limits(

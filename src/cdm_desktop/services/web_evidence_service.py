@@ -222,6 +222,13 @@ class WebEvidenceService:
             result.items.append(item)
             job.progress = min(100, round(job.pages_processed * 100 / max(1, job.max_pages)))
             candidates = profile_candidates_from_evidence(item, profile)
+            persisted_statuses = {
+                candidate.id: candidate.status
+                for candidate in self.store.list_candidates(job.company_id)
+            }
+            for candidate in candidates:
+                if persisted_statuses.get(candidate.id) in {"accepted", "rejected"}:
+                    candidate.status = persisted_statuses[candidate.id]
             if profile is not None:
                 apply_auto_accepted_candidates(profile, candidates)
             for candidate in candidates:
@@ -293,7 +300,12 @@ class WebEvidenceService:
             self._skip(result, queued.url, skip_reason)
             return None
 
-        robots = self.robots_policy.can_fetch(safety.normalized_url)
+        request_domains = [safety.domain] if policy.same_domain_only else job.allowed_domains
+        robots = self.robots_policy.can_fetch(
+            safety.normalized_url,
+            allowed_domains=request_domains,
+            blocked_domains=policy.blocked_domains,
+        )
         if not robots.allowed:
             self._skip(result, queued.url, robots.error_message, error_type="robots_blocked")
             return None
@@ -344,7 +356,11 @@ class WebEvidenceService:
                     job.error_type = "timeout"
                     job.error_message = "网页证据任务达到总超时限制。"
                 return None
-            response, error = self.fetcher.fetch(safety.normalized_url)
+            response, error = self.fetcher.fetch(
+                safety.normalized_url,
+                allowed_domains=request_domains,
+                blocked_domains=policy.blocked_domains,
+            )
             last_request_at[safety.domain] = time.monotonic()
         finally:
             domain_lock.release()

@@ -21,8 +21,6 @@ BLOCKED_DOMAINS = {
     "www.weibo.com",
 }
 
-BLOCKED_HOST_SUFFIXES = tuple(f".{domain}" for domain in BLOCKED_DOMAINS)
-
 TRACKING_QUERY_PREFIXES = ("utm_", "pk_", "ga_")
 TRACKING_QUERY_KEYS = {
     "fbclid",
@@ -91,36 +89,13 @@ def validate_crawl_url(
         validated = URLSafetyValidator(
             resolver=resolver,
             allow_localhost_for_dev=dev_mode,
+            allowed_domains=allowed_domains,
+            blocked_domains=BLOCKED_DOMAINS | set(blocked_domains or []),
         ).validate(raw)
     except UnsafeUrlError as exc:
         return UrlSafetyResult(False, str(exc))
 
     domain = validated.hostname
-    if _is_blocked_domain(domain, blocked_domains or []):
-        return UrlSafetyResult(
-            False,
-            "该域名被安全策略禁止采集。",
-            validated.url,
-            domain,
-            validated.resolved_ips,
-        )
-    normalized_allowed = {
-        item.casefold().strip(".").removeprefix("www.")
-        for item in (allowed_domains or [])
-        if item
-    }
-    compared_domain = domain.removeprefix("www.")
-    if normalized_allowed and not any(
-        compared_domain == item or compared_domain.endswith(f".{item}")
-        for item in normalized_allowed
-    ):
-        return UrlSafetyResult(
-            False,
-            "URL 不在本次采集允许域名内。",
-            validated.url,
-            domain,
-            validated.resolved_ips,
-        )
     normalized = canonicalize_crawl_url(validated.url)
     return UrlSafetyResult(True, "", normalized, domain, validated.resolved_ips)
 
@@ -172,14 +147,6 @@ def same_registered_domain(url: str, seed_domain: str) -> bool:
     host = host.removeprefix("www.")
     base = base.removeprefix("www.")
     return bool(host and base and (host == base or host.endswith(f".{base}")))
-
-
-def _is_blocked_domain(domain: str, extra_blocked: list[str]) -> bool:
-    blocked = BLOCKED_DOMAINS | {item.casefold().strip(".") for item in extra_blocked if item}
-    if domain in blocked:
-        return True
-    suffixes = BLOCKED_HOST_SUFFIXES + tuple(f".{item}" for item in blocked)
-    return any(domain.endswith(suffix) for suffix in suffixes)
 
 
 def _looks_like_unbounded_calendar(path: str, query: str) -> bool:

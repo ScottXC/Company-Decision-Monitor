@@ -170,3 +170,21 @@ def test_candidates_persist_with_traceable_evidence(tmp_path: Path) -> None:
         if candidate.id == loaded[0].id
     )
     assert updated.status == "accepted"
+
+
+def test_rejected_candidate_status_is_terminal_on_rediscovery(tmp_path: Path) -> None:
+    store = WebEvidenceStore(make_paths(tmp_path))
+    item = store.save_evidence(evidence())
+    candidate = profile_candidates_from_evidence(item, CompanyProfile())[0]
+    store.save_candidate(item.company_id, candidate)
+    assert store.update_candidate_status(candidate.id, "rejected")
+
+    candidate.status = "auto_accepted"
+    store.save_candidate(item.company_id, candidate)
+
+    stored = next(
+        value
+        for value in store.list_candidates(item.company_id)
+        if value.id == candidate.id
+    )
+    assert stored.status == "rejected"

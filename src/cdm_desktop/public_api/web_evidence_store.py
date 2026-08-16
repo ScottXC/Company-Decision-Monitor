@@ -239,7 +239,12 @@ class WebEvidenceStore:
                     id, company_id, field_name, proposed_value_json, source_url,
                     evidence_id, confidence, current_value_json, status, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET status=excluded.status
+                ON CONFLICT(id) DO UPDATE SET
+                    status=CASE
+                        WHEN profile_field_candidates.status IN ('accepted', 'rejected')
+                            THEN profile_field_candidates.status
+                        ELSE excluded.status
+                    END
                 """,
                 (
                     candidate.id,

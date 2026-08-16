@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
+from cdm_desktop.public_api.models import ProviderError
 from cdm_desktop.public_api.web_fetcher import SafeWebFetcher
 
 CRAWLERGO_USER_AGENT = "CompanyDecisionMonitorBot/0.1.5"
@@ -32,17 +33,33 @@ class RobotsPolicy:
         self.http = http or SafeWebFetcher()
         self.user_agent = user_agent
         self.cache_ttl_seconds = max(60, cache_ttl_seconds)
-        self._cache: dict[str, tuple[float, str | None, bool]] = {}
+        self._cache: dict[str, tuple[float, str | None, ProviderError | None]] = {}
         self._lock = threading.Lock()
 
-    def can_fetch(self, url: str) -> RobotsDecision:
+    def can_fetch(
+        self,
+        url: str,
+        *,
+        allowed_domains: list[str] | None = None,
+        blocked_domains: list[str] | None = None,
+    ) -> RobotsDecision:
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return RobotsDecision(False, "", error_message="URL 格式无效。")
         origin = f"{parsed.scheme}://{parsed.netloc}"
         robots_url = urljoin(origin, "/robots.txt")
-        text, missing = self._robots_text(robots_url)
-        if missing:
+        text, error = self._robots_text(
+            robots_url,
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+        )
+        if error and error.state in {"unsafe_url", "response_too_large"}:
+            return RobotsDecision(
+                False,
+                robots_url,
+                error_message="robots.txt 的目标不安全，已停止自动采集。",
+            )
+        if error:
             return RobotsDecision(
                 True,
                 robots_url,
@@ -56,17 +73,27 @@ class RobotsPolicy:
             user_agent=self.user_agent,
         )
 
-    def _robots_text(self, robots_url: str) -> tuple[str | None, bool]:
+    def _robots_text(
+        self,
+        robots_url: str,
+        *,
+        allowed_domains: list[str] | None,
+        blocked_domains: list[str] | None,
+    ) -> tuple[str | None, ProviderError | None]:
         now = time.monotonic()
         with self._lock:
             cached = self._cache.get(robots_url)
             if cached and cached[0] > now:
                 return cached[1], cached[2]
-        text, error = self.http.get_text("web_evidence", robots_url)
-        missing = error is not None
+        text, error = self.http.get_text(
+            "web_evidence",
+            robots_url,
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+        )
         with self._lock:
-            self._cache[robots_url] = (now + self.cache_ttl_seconds, text, missing)
-        return text, missing
+            self._cache[robots_url] = (now + self.cache_ttl_seconds, text, error)
+        return text, error
 
 
 def evaluate_robots_text(

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtWidgets import QLabel, QPushButton
+from PySide6.QtWidgets import QDialog, QLabel, QPlainTextEdit, QPushButton
 
 from cdm_desktop.paths import AppPaths
-from cdm_desktop.public_api.models import CompanyResult
+from cdm_desktop.public_api.models import CompanyProfile, CompanyResult
 from cdm_desktop.public_api.web_evidence_models import WebEvidenceItem
 from cdm_desktop.ui.components import CollapsibleSection
 from cdm_desktop.ui.pages.company_detail import CompanyDetailPage
@@ -73,6 +73,36 @@ def test_evidence_card_has_list_view_open_and_delete_actions(qtbot, tmp_path: Pa
     page.shutdown()
 
 
+def test_official_page_without_body_explains_javascript_limitation(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page = CompanyDetailPage(lambda _route: None, make_paths(tmp_path))
+    qtbot.addWidget(page)
+    dialogs: list[QDialog] = []
+    monkeypatch.setattr(QDialog, "exec", lambda dialog: dialogs.append(dialog))
+    item = WebEvidenceItem(
+        id="evidence:js-only",
+        company_id="company:1",
+        source_url="https://example.com/investors",
+        final_url="https://example.com/investors",
+        canonical_url="https://example.com/investors",
+        domain="example.com",
+        title="Investor Relations",
+        display_mode="full_cleaned_text",
+        is_official_domain=True,
+    )
+
+    page._view_web_evidence(item)
+
+    assert dialogs
+    viewer = dialogs[0].findChild(QPlainTextEdit)
+    assert viewer is not None
+    assert "页面主要依赖 JavaScript，当前未提取到可用正文。" in viewer.toPlainText()
+    page.shutdown()
+
+
 def test_settings_exposes_web_evidence_runtime_storage_and_limits(qtbot, tmp_path: Path) -> None:
     page = SettingsPage(lambda _route: None, make_paths(tmp_path))
     qtbot.addWidget(page)
@@ -125,4 +155,39 @@ def test_profile_candidate_confirmation_controls_are_rendered(qtbot, tmp_path: P
     buttons = {button.text() for button in tab.findChildren(QPushButton)}
     assert "接受候选" in buttons
     assert "拒绝候选" in buttons
+    page.shutdown()
+
+
+def test_crawl_worker_keeps_the_profile_snapshot_from_start(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    page = CompanyDetailPage(lambda _route: None, make_paths(tmp_path))
+    qtbot.addWidget(page)
+    company = CompanyResult(
+        name="Example",
+        website="https://example.com/",
+        provider="Local",
+        provider_id="symbol_universe",
+    )
+    page.current_company = company
+    tab = page._web_info_tab(company)
+    qtbot.addWidget(tab)
+    original_profile = CompanyProfile(legal_name="Example Corporation")
+    page._loaded_profile = original_profile
+    captured: list[object] = []
+    monkeypatch.setattr(
+        page,
+        "_start_crawl_worker",
+        lambda worker, _finished, _error: captured.append(worker),
+    )
+
+    page._start_web_evidence_crawl("https://example.com/")
+    page._loaded_profile = CompanyProfile(legal_name="Other Corporation")
+
+    assert captured
+    worker = captured[0]
+    assert worker.args[2] is original_profile  # type: ignore[attr-defined]
+    page.web_crawl_cancel_event = None
     page.shutdown()

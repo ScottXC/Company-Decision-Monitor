@@ -774,7 +774,13 @@ class CompanyDetailPage(QWidget):
         self.web_evidence_status.setText("运行状态：正在准备安全校验与 robots.txt 检查...")
         self._clear_layout(self.web_evidence_list)
         self.web_evidence_list.addWidget(LoadingState("正在采集网页证据..."))
-        worker = ProgressFunctionWorker(self._run_web_evidence_crawl, company, url)
+        profile_snapshot = self._loaded_profile
+        worker = ProgressFunctionWorker(
+            self._run_web_evidence_crawl,
+            company,
+            url,
+            profile_snapshot,
+        )
         crawl_company_id = self._web_crawl_company_id
         worker.signals.progress.connect(
             lambda current, total, message, company_id=crawl_company_id: self._update_web_evidence_progress_for(
@@ -802,6 +808,7 @@ class CompanyDetailPage(QWidget):
         self,
         company: CompanyResult,
         url: str,
+        profile: CompanyProfile | None,
         *,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> CrawlResult:
@@ -812,7 +819,7 @@ class CompanyDetailPage(QWidget):
             seed_urls=[url],
             policy=policy,
             company_website=company.website or str(company.raw.get("website") or ""),
-            profile=self._loaded_profile,
+            profile=profile,
             progress_callback=progress_callback,
             cancel_event=self.web_crawl_cancel_event,
         )
@@ -1040,7 +1047,12 @@ class CompanyDetailPage(QWidget):
         source.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(source)
         content = item.cleaned_text or item.content_snippet or item.extracted_text_preview
-        details = [content or "当前显示规则下没有可展示的正文。"]
+        if content:
+            details = [content]
+        elif item.is_official_domain and item.display_mode == "full_cleaned_text":
+            details = ["页面主要依赖 JavaScript，当前未提取到可用正文。"]
+        else:
+            details = ["当前显示规则下没有可展示的正文。"]
         if item.headings:
             details.append("\n标题层级\n" + "\n".join(f"• {value}" for value in item.headings))
         if item.structured_data:

@@ -482,7 +482,11 @@ def _main_text(soup: BeautifulSoup, *, max_content_chars: int) -> str:
         ["script", "style", "noscript", "svg", "iframe", "nav", "footer", "header", "aside", "form", "dialog"]
     ):
         unwanted.decompose()
-    for tag in soup.find_all(True):
+    for tag in list(soup.find_all(True)):
+        # Decomposing an ancestor clears descendant attributes. Those detached
+        # descendants can still be present in this traversal snapshot.
+        if tag.attrs is None or tag.parent is None:
+            continue
         marker = " ".join(
             [
                 str(tag.get("id") or ""),

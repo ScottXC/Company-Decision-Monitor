@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from cdm_desktop.public_api.crawl_safety import BLOCKED_DOMAINS
 from cdm_desktop.public_api.models import ProviderError
 from cdm_desktop.security.url_safety import (
     FetchTooLargeError,
@@ -45,7 +46,13 @@ class SafeWebFetcher:
         self.transport = transport
         self.allow_localhost_for_dev = allow_localhost_for_dev
 
-    def fetch(self, url: str) -> tuple[WebFetchResponse | None, ProviderError | None]:
+    def fetch(
+        self,
+        url: str,
+        *,
+        allowed_domains: list[str] | None = None,
+        blocked_domains: list[str] | None = None,
+    ) -> tuple[WebFetchResponse | None, ProviderError | None]:
         try:
             fetched = safe_fetch_url(
                 url,
@@ -55,6 +62,8 @@ class SafeWebFetcher:
                 resolver=self.resolver,
                 transport=self.transport,
                 allow_localhost_for_dev=self.allow_localhost_for_dev,
+                allowed_domains=allowed_domains,
+                blocked_domains=BLOCKED_DOMAINS | set(blocked_domains or []),
             )
         except UnsafeUrlError as exc:
             return None, ProviderError(
@@ -112,11 +121,17 @@ class SafeWebFetcher:
         url: str,
         *,
         headers: dict[str, str] | None = None,
+        allowed_domains: list[str] | None = None,
+        blocked_domains: list[str] | None = None,
     ) -> tuple[str | None, ProviderError | None]:
         # Headers are intentionally ignored: cookies, tokens and caller-supplied
         # impersonation headers never enter the Web Evidence transport.
         _ = headers
-        response, error = self.fetch(url)
+        response, error = self.fetch(
+            url,
+            allowed_domains=allowed_domains,
+            blocked_domains=blocked_domains,
+        )
         return (response.text if response else None), error
 
 

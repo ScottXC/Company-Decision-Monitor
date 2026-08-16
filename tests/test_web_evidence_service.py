@@ -30,12 +30,12 @@ def public_resolver(_host: str, _port: object, *, type: int = 0):
 
 
 class AllowRobots:
-    def can_fetch(self, url: str) -> RobotsDecision:
+    def can_fetch(self, url: str, **_kwargs) -> RobotsDecision:
         return RobotsDecision(True, f"{url.split('/', 3)[:3]}/robots.txt")
 
 
 class BlockRobots:
-    def can_fetch(self, _url: str) -> RobotsDecision:
+    def can_fetch(self, _url: str, **_kwargs) -> RobotsDecision:
         return RobotsDecision(
             False,
             "https://example.com/robots.txt",
@@ -50,7 +50,7 @@ class FakeFetcher:
         self.pages = pages
         self.calls: list[str] = []
 
-    def fetch(self, url: str):
+    def fetch(self, url: str, **_kwargs):
         self.calls.append(url)
         html = self.pages.get(url, "<html><head><title>Missing</title></head><body>Missing</body></html>")
         return (
@@ -238,3 +238,61 @@ def test_xueqiu_is_rejected_before_robots_or_fetch(tmp_path: Path) -> None:
     assert result.items == []
     assert result.skipped_urls
     assert fetcher.calls == []
+
+
+def test_rejected_profile_candidate_is_not_reapplied_on_recrawl(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = WebEvidenceStore(make_paths(tmp_path))
+    fetcher = FakeFetcher({"https://example.com/": OFFICIAL_HTML})
+    service = WebEvidenceService(
+        fetcher=fetcher,  # type: ignore[arg-type]
+        robots_policy=AllowRobots(),  # type: ignore[arg-type]
+        store=store,
+        resolver=public_resolver,
+    )
+    monkeypatch.setattr(
+        "cdm_desktop.services.web_evidence_service._wait_for_domain_delay",
+        lambda *_args, **_kwargs: True,
+    )
+
+    initial_profile = CompanyProfile(legal_name="Temporary existing value")
+    first = service.crawl(
+        company_id="company:1",
+        company_name="Example",
+        seed_urls=["https://example.com/"],
+        company_website="https://example.com/",
+        profile=initial_profile,
+        policy=CrawlPolicy(max_pages_per_domain=1, max_depth=0),
+    )
+    legal = next(
+        candidate
+        for candidate in first.profile_candidates
+        if candidate.field_name == "legal_name"
+    )
+    assert legal.status == "pending"
+    assert store.update_candidate_status(legal.id, "rejected")
+
+    empty_profile = CompanyProfile()
+    second = service.crawl(
+        company_id="company:1",
+        company_name="Example",
+        seed_urls=["https://example.com/"],
+        company_website="https://example.com/",
+        profile=empty_profile,
+        policy=CrawlPolicy(max_pages_per_domain=1, max_depth=0),
+    )
+
+    rejected = next(
+        candidate
+        for candidate in second.profile_candidates
+        if candidate.field_name == "legal_name"
+    )
+    assert rejected.status == "rejected"
+    assert empty_profile.legal_name == ""
+    assert next(
+        candidate
+        for candidate in store.list_candidates("company:1")
+        if candidate.id == rejected.id
+    ).status == "rejected"

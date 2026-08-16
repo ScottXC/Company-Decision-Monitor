@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -58,9 +58,13 @@ class URLSafetyValidator:
         *,
         resolver: Resolver | None = None,
         allow_localhost_for_dev: bool = False,
+        allowed_domains: Iterable[str] | None = None,
+        blocked_domains: Iterable[str] | None = None,
     ) -> None:
         self.resolver = resolver or socket.getaddrinfo
         self.allow_localhost_for_dev = allow_localhost_for_dev
+        self.allowed_domains = _normalized_domains(allowed_domains)
+        self.blocked_domains = _normalized_domains(blocked_domains)
 
     def validate(self, url: str) -> ValidatedUrl:
         raw_parsed = urlsplit((url or "").strip())
@@ -77,6 +81,19 @@ class URLSafetyValidator:
             hostname in BLOCKED_HOSTNAMES or hostname.endswith(".localhost")
         ):
             raise UnsafeUrlError("不允许访问 localhost 或 metadata 主机")
+        compared_hostname = _scope_hostname(hostname)
+        if any(
+            compared_hostname == blocked
+            or compared_hostname.endswith(f".{blocked}")
+            for blocked in self.blocked_domains
+        ):
+            raise UnsafeUrlError("该域名被安全策略禁止采集")
+        if self.allowed_domains and not any(
+            compared_hostname == allowed
+            or compared_hostname.endswith(f".{allowed}")
+            for allowed in self.allowed_domains
+        ):
+            raise UnsafeUrlError("URL 不在本次采集允许域名内")
 
         try:
             literal = ipaddress.ip_address(hostname)
@@ -155,10 +172,14 @@ def validate_url(
     *,
     resolver: Resolver | None = None,
     allow_localhost_for_dev: bool = False,
+    allowed_domains: Iterable[str] | None = None,
+    blocked_domains: Iterable[str] | None = None,
 ) -> str:
     return URLSafetyValidator(
         resolver=resolver,
         allow_localhost_for_dev=allow_localhost_for_dev,
+        allowed_domains=allowed_domains,
+        blocked_domains=blocked_domains,
     ).validate(url).url
 
 
@@ -172,10 +193,14 @@ def safe_fetch_url(
     resolver: Resolver | None = None,
     transport: httpx.BaseTransport | None = None,
     allow_localhost_for_dev: bool = False,
+    allowed_domains: Iterable[str] | None = None,
+    blocked_domains: Iterable[str] | None = None,
 ) -> FetchedUrl:
     validator = URLSafetyValidator(
         resolver=resolver,
         allow_localhost_for_dev=allow_localhost_for_dev,
+        allowed_domains=allowed_domains,
+        blocked_domains=blocked_domains,
     )
     initial = validator.validate(url).url
     current = initial
@@ -273,3 +298,16 @@ def _validate_response_peer(
         return
     if required:
         raise UnsafeUrlError("无法验证实际连接 IP，已安全终止请求")
+
+
+def _normalized_domains(values: Iterable[str] | None) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in values or ():
+        hostname = _scope_hostname(str(value))
+        if hostname and hostname not in normalized:
+            normalized.append(hostname)
+    return tuple(normalized)
+
+
+def _scope_hostname(value: str) -> str:
+    return value.casefold().strip().strip(".").removeprefix("www.")

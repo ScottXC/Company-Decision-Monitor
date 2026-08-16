@@ -5,6 +5,7 @@ from cdm_desktop.public_api.content_extractor import (
     extract_pdf_evidence,
     extract_web_evidence,
 )
+from cdm_desktop.public_api.web_fetcher import _decode_text
 
 HTML = """
 <!doctype html>
@@ -51,7 +52,7 @@ HTML = """
   </script>
 </head><body>
   <nav>Home Products Investors Careers</nav>
-  <div class="cookie-banner">Accept all cookies</div>
+  <div class="cookie-banner"><section><span>Accept all cookies</span></section></div>
   <main>
     <h1>Investor Relations</h1>
     <h2>Latest results</h2>
@@ -133,3 +134,30 @@ def test_deterministic_content_classification() -> None:
     assert classify_content("https://example.com/reports/q2.pdf") == "financial_report"
     assert classify_content("https://example.com/careers", is_official_domain=True) == "careers"
     assert classify_content("https://example.com/", is_official_domain=True) == "company_homepage"
+
+
+def test_empty_malformed_encoding_and_long_content_are_bounded() -> None:
+    empty = extract_web_evidence(
+        "",
+        source_url="https://example.com/empty",
+        is_official_domain=True,
+    )
+    assert empty.cleaned_text == ""
+    assert empty.content_snippet == ""
+
+    decoded = _decode_text(
+        b"\xff\xfe\x00broken\x80",
+        "text/html; charset=unknown-encoding",
+    )
+    assert isinstance(decoded, str)
+    assert decoded
+
+    long_html = "<html><body><main><p>" + ("public evidence " * 1_000) + "</p></main></body></html>"
+    bounded = extract_web_evidence(
+        long_html,
+        source_url="https://example.com/long",
+        is_official_domain=True,
+        max_content_chars=2_000,
+    )
+    assert 1_900 <= len(bounded.cleaned_text) <= 2_000
+    assert len(bounded.content_snippet) <= 300

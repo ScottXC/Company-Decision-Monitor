@@ -42,9 +42,19 @@ def private_resolver(_host: str, _port: object, *, type: int = 0):
         ("http://localhost/", False),
         ("http://127.0.0.1/", False),
         ("http://[::1]/", False),
+        ("http://10.1.2.3/", False),
+        ("http://172.16.0.1/", False),
+        ("http://192.168.1.1/", False),
+        ("http://169.254.1.1/", False),
+        ("http://[fc00::1]/", False),
+        ("http://[fe80::1]/", False),
         ("http://169.254.169.254/latest/meta-data", False),
+        ("http://100.100.100.200/latest/meta-data", False),
+        ("http://[fd00:ec2::254]/latest/meta-data", False),
         ("https://user:password@example.com/", False),
         ("https://xueqiu.com/S/AAPL", False),
+        ("https://XUEQIU.COM.:443/S/AAPL", False),
+        ("https://news.xueqiu.com/S/AAPL", False),
     ],
 )
 def test_url_safety_allow_and_reject(url: str, allowed: bool) -> None:
@@ -68,6 +78,37 @@ def test_redirect_to_private_ip_is_revalidated() -> None:
             resolver=public_resolver,
             transport=httpx.MockTransport(handler),
         )
+
+
+def test_redirect_to_blocked_or_out_of_scope_domain_stops_before_second_get() -> None:
+    for location in (
+        "https://xueqiu.com/S/AAPL",
+        "https://other.example/public",
+    ):
+        seen: list[str] = []
+
+        def handler(
+            request: httpx.Request,
+            *,
+            seen: list[str] = seen,
+            location: str = location,
+        ) -> httpx.Response:
+            seen.append(str(request.url))
+            return httpx.Response(302, headers={"Location": location}, request=request)
+
+        fetcher = SafeWebFetcher(
+            resolver=public_resolver,
+            transport=httpx.MockTransport(handler),
+        )
+        response, error = fetcher.fetch(
+            "https://example.com/start",
+            allowed_domains=["example.com"],
+        )
+
+        assert response is None
+        assert error is not None
+        assert error.state == "unsafe_url"
+        assert seen == ["https://example.com/start"]
 
 
 def test_actual_peer_ip_is_checked_against_dns_rebinding() -> None:
@@ -108,6 +149,7 @@ def test_web_fetcher_sends_no_cookie_token_or_impersonation_headers() -> None:
     captured: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
         captured.update({key.casefold(): value for key, value in request.headers.items()})
         return httpx.Response(
             200,
@@ -128,6 +170,40 @@ def test_web_fetcher_sends_no_cookie_token_or_impersonation_headers() -> None:
     assert "cookie" not in captured
     assert "authorization" not in captured
     assert "xq_a_token" not in " ".join(captured.values()).casefold()
+
+
+def test_caller_supplied_authentication_headers_are_ignored() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update({key.casefold(): value for key, value in request.headers.items()})
+        return httpx.Response(
+            200,
+            text="User-agent: *\nAllow: /",
+            headers={"Content-Type": "text/plain"},
+            request=request,
+        )
+
+    fetcher = SafeWebFetcher(
+        resolver=public_resolver,
+        transport=httpx.MockTransport(handler),
+    )
+    text, error = fetcher.get_text(
+        "web_evidence",
+        "https://example.com/robots.txt",
+        headers={
+            "Cookie": "session=secret",
+            "Authorization": "Bearer secret",
+            "xq_a_token": "secret",
+        },
+        allowed_domains=["example.com"],
+    )
+
+    assert error is None
+    assert text
+    assert "cookie" not in captured
+    assert "authorization" not in captured
+    assert "xq_a_token" not in captured
 
 
 def test_pdf_response_body_is_not_downloaded_or_decoded() -> None:
